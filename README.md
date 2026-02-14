@@ -28,3 +28,9 @@ python -m venv .venv
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
+
+## Run Emotion CV
+
+```bash
+python emotions.py --source-type local --index 0
+```
