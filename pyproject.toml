@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "treehacks26"
+version = "0.1.0"
+description = "Modular camera streaming utility for CV prototyping"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26,<3.0",
+  "opencv-python>=4.9,<5.0",
+]
+
+[tool.setuptools]
+py-modules = ["camera"]
