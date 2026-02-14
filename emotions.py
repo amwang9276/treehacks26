@@ -14,7 +14,7 @@ from pathlib import Path
 import sys
 import urllib.request
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -45,6 +45,14 @@ class FacePrediction:
     score: float
 
 
+@dataclass(frozen=True)
+class EmotionObservation:
+    timestamp_s: float
+    label: Optional[str]
+    score: float
+    face_count: int
+
+
 MP_FACE_DETECTOR_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/face_detector/"
     "blaze_face_short_range/float16/latest/blaze_face_short_range.tflite"
@@ -65,11 +73,16 @@ class EmotionProcessor(FrameProcessor):
         inference_fps: float = 10.0,
         face_padding_ratio: float = 0.15,
         face_detector_model_path: Optional[str] = None,
+        on_observation: Optional[Callable[[EmotionObservation], None]] = None,
     ) -> None:
         self.inference_period_s = 1.0 / max(inference_fps, 1.0)
         self.face_padding_ratio = max(0.0, face_padding_ratio)
         self.last_infer_ts: float = -1.0
         self.last_predictions: List[FacePrediction] = []
+        self.last_observation: EmotionObservation = EmotionObservation(
+            timestamp_s=0.0, label=None, score=0.0, face_count=0
+        )
+        self.on_observation = on_observation
         self._face_detector_mode: str = ""
         self.detector = self._init_face_detector(
             min_detection_confidence=min_detection_confidence,
@@ -263,9 +276,27 @@ class EmotionProcessor(FrameProcessor):
             self.last_infer_ts < 0
             or (packet.timestamp_s - self.last_infer_ts) >= self.inference_period_s
         )
-        if should_infer:
+        if not boxes:
+            self.last_predictions = []
+        elif should_infer:
             self.last_predictions = self._run_inference(frame, boxes)
             self.last_infer_ts = packet.timestamp_s
+
+        if self.last_predictions:
+            best = max(self.last_predictions, key=lambda pred: pred.score)
+            observation = EmotionObservation(
+                timestamp_s=packet.timestamp_s,
+                label=best.label,
+                score=best.score,
+                face_count=len(self.last_predictions),
+            )
+        else:
+            observation = EmotionObservation(
+                timestamp_s=packet.timestamp_s, label=None, score=0.0, face_count=0
+            )
+        self.last_observation = observation
+        if self.on_observation is not None:
+            self.on_observation(observation)
 
         for pred in self.last_predictions:
             x1, y1, x2, y2 = pred.box
