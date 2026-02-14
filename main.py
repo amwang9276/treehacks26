@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import queue
 import sys
@@ -9,19 +8,19 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from typing import Dict, Optional
 
 import cv2
+from openai import OpenAI
 
 from camera import FramePacket, build_local_camera_help_text, build_source_from_args
 from emotions import EmotionObservation, EmotionProcessor
-from suno import SunoError, generate_from_prompt
+from music import MusicPlaybackError, MusicPlayer
+from suno import SunoError, SunoGenerationResult, generate_from_prompt
 
 
-OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
+DEFAULT_OPENAI_MAX_TOKENS = 48
 
 
 def _read_env_file(path: Path = Path(".env")) -> Dict[str, str]:
@@ -37,7 +36,7 @@ def _read_env_file(path: Path = Path(".env")) -> Dict[str, str]:
     return values
 
 
-def get_openai_api_key(explicit: Optional[str] = None) -> str:
+def get_openai_api_key(explicit: Optional[str] = None) -> Optional[str]:
     if explicit:
         return explicit
     env_key = os.environ.get("OPENAI_API_KEY")
@@ -46,69 +45,48 @@ def get_openai_api_key(explicit: Optional[str] = None) -> str:
     file_key = _read_env_file().get("OPENAI_API_KEY")
     if file_key:
         return file_key
-    raise RuntimeError("OPENAI_API_KEY not found (arg/env/.env).")
+    return None
 
 
 def generate_suno_prompt_for_emotion(
     emotion: str,
     *,
-    api_key: str,
+    client: OpenAI,
     model: str = DEFAULT_OPENAI_MODEL,
+    max_tokens: int = DEFAULT_OPENAI_MAX_TOKENS,
     timeout_s: float = 30.0,
 ) -> str:
-    system_text = (
-        "You generate concise music-generation prompts for Suno.\n"
-        "Output only a single prompt line (no quotes, no markdown).\n"
-        "Length: 14-24 words.\n"
-        "Include mood, tempo, instrumentation, and production style."
-    )
-    user_text = (
-        "Detected emotion: "
-        f"{emotion}\n"
-        "Create one prompt for a song that matches this feeling."
-    )
-    payload = {
-        "model": model,
-        "input": [
-            {"role": "system", "content": [{"type": "input_text", "text": system_text}]},
-            {"role": "user", "content": [{"type": "input_text", "text": user_text}]},
-        ],
-        "max_output_tokens": 120,
-    }
-    req = Request(
-        OPENAI_RESPONSES_URL,
-        data=json.dumps(payload).encode("utf-8"),
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-    )
+    effective_client = client.with_options(timeout=timeout_s)
+    print(f"[OPENAI] generating prompt for emotion '{emotion}'")
     try:
-        with urlopen(req, timeout=timeout_s) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except HTTPError as err:
-        detail = err.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"OpenAI HTTP error {err.code}: {detail}") from err
-    except URLError as err:
-        raise RuntimeError(f"OpenAI connection error: {err}") from err
+        completion = effective_client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Output exactly one short Suno music prompt line. "
+                        "No markdown, no quotes."
+                    ),
+                },
+                {"role": "user", "content": f"Detected emotion: {emotion}"},
+            ],
+            max_tokens=max(16, max_tokens),
+            temperature=0.5,
+        )
+    except Exception as err:
+        raise RuntimeError(f"OpenAI SDK error: {err}") from err
 
-    text = (data.get("output_text") or "").strip()
-    if text:
-        return text
-
-    output = data.get("output") or []
-    for item in output:
-        for content in item.get("content", []):
-            candidate = (content.get("text") or "").strip()
-            if candidate:
-                return candidate
-    raise RuntimeError("OpenAI response did not include output text.")
+    content = completion.choices[0].message.content if completion.choices else None
+    text = (content or "").strip()
+    if not text:
+        raise RuntimeError("OpenAI completion did not include prompt text.")
+    return text
 
 
 @dataclass
 class StableEmotionChangeDetector:
-    min_stable_seconds: float = 3.0
+    min_stable_seconds: float = 1.0
     candidate_emotion: Optional[str] = None
     candidate_since_s: Optional[float] = None
     last_triggered_emotion: Optional[str] = None
@@ -130,8 +108,7 @@ class StableEmotionChangeDetector:
             self.candidate_since_s = now
             return None
 
-        stable_for = now - self.candidate_since_s
-        if stable_for < self.min_stable_seconds:
+        if now - self.candidate_since_s < self.min_stable_seconds:
             return None
 
         if emotion == self.last_triggered_emotion:
@@ -141,32 +118,77 @@ class StableEmotionChangeDetector:
         return emotion
 
 
+def _choose_track_url(result: SunoGenerationResult) -> Optional[str]:
+    for track in result.tracks:
+        if track.stream_url:
+            return track.stream_url
+        if track.audio_url:
+            return track.audio_url
+    return None
+
+
 def _music_worker(
     emotion_queue: "queue.Queue[str]",
     *,
-    openai_api_key: str,
+    openai_api_key: Optional[str],
     openai_model: str,
-    suno_wait: bool,
+    openai_max_tokens: int,
+    suno_poll_interval_s: float,
+    player: Optional[MusicPlayer],
 ) -> None:
+    last_processed_emotion: Optional[str] = None
+    client: Optional[OpenAI] = None
+    if openai_api_key:
+        client = OpenAI(api_key=openai_api_key)
+
     while True:
         emotion = emotion_queue.get()
         if emotion == "__STOP__":
             return
+        if emotion == last_processed_emotion:
+            continue
         try:
+            if client is None:
+                raise RuntimeError("OPENAI_API_KEY is required to generate prompts.")
             prompt = generate_suno_prompt_for_emotion(
-                emotion, api_key=openai_api_key, model=openai_model
+                emotion,
+                client=client,
+                model=openai_model,
+                max_tokens=openai_max_tokens,
             )
-            result = generate_from_prompt(prompt, wait=suno_wait)
-            print(f"[MUSIC] emotion={emotion} prompt={prompt}")
-            if isinstance(result, str):
-                print(f"[MUSIC] created task_id={result}")
+            prompt_source = "openai"
+
+            result = generate_from_prompt(
+                prompt,
+                wait=True,
+                poll_interval_s=max(0.5, suno_poll_interval_s),
+            )
+            url = _choose_track_url(result)
+            if not url:
+                print(
+                    f"[MUSIC] task_id={result.task_id} returned no playable url.",
+                    file=sys.stderr,
+                )
+                continue
+            if player is None:
+                print(
+                    f"[MUSIC] emotion={emotion} prompt_source={prompt_source} "
+                    f"task_id={result.task_id} playable_url={url} (playback disabled)"
+                )
             else:
-                print(f"[MUSIC] task_id={result.task_id} tracks={len(result.tracks)}")
+                played_file = player.play_url(url)
+                print(
+                    f"[MUSIC] emotion={emotion} prompt_source={prompt_source} "
+                    f"task_id={result.task_id} playing={played_file}"
+                )
+            last_processed_emotion = emotion
+        except MusicPlaybackError as err:
+            print(f"[MUSIC] playback error for emotion '{emotion}': {err}", file=sys.stderr)
         except SunoError as err:
             print(f"[MUSIC] Suno error for emotion '{emotion}': {err}", file=sys.stderr)
         except Exception as err:
             print(
-                f"[MUSIC] Generation error for emotion '{emotion}': {err}",
+                f"[MUSIC] generation error for emotion '{emotion}': {err}",
                 file=sys.stderr,
             )
 
@@ -174,8 +196,8 @@ def _music_worker(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run camera + emotion recognition and trigger song generation when "
-            "emotion changes and is stable for >= 3 seconds."
+            "Run camera + emotion recognition and auto-generate/play Suno music "
+            "when emotion changes and is stable for >= N seconds."
         )
     )
     parser.add_argument(
@@ -238,8 +260,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--openai-model",
         type=str,
-        default=DEFAULT_OPENAI_MODEL,
+        default="gpt-4o-mini",
         help="OpenAI model used to convert emotion to Suno prompt.",
+    )
+    parser.add_argument(
+        "--openai-max-tokens",
+        type=int,
+        default=DEFAULT_OPENAI_MAX_TOKENS,
+        help="Max tokens for OpenAI prompt generation (lower is usually faster).",
     )
     parser.add_argument(
         "--openai-api-key",
@@ -248,9 +276,16 @@ def parse_args() -> argparse.Namespace:
         help="Optional OpenAI API key override.",
     )
     parser.add_argument(
-        "--suno-wait",
-        action="store_true",
-        help="Wait for Suno completion instead of returning only task IDs.",
+        "--ffplay-path",
+        type=str,
+        default=None,
+        help="Optional explicit path to ffplay executable.",
+    )
+    parser.add_argument(
+        "--suno-poll-interval",
+        type=float,
+        default=2.5,
+        help="Suno status polling interval in seconds (2-3s recommended).",
     )
     return parser.parse_args()
 
@@ -259,30 +294,52 @@ def main() -> None:
     args = parse_args()
     source = None
     processor: Optional[EmotionProcessor] = None
+    player: Optional[MusicPlayer] = None
+
     openai_api_key = get_openai_api_key(args.openai_api_key)
 
     detector = StableEmotionChangeDetector(min_stable_seconds=args.stable_seconds)
     emotion_queue: "queue.Queue[str]" = queue.Queue()
+    try:
+        player = MusicPlayer(ffplay_path=args.ffplay_path)
+    except MusicPlaybackError as err:
+        print(f"[MUSIC] playback disabled: {err}", file=sys.stderr)
+        player = None
     worker = threading.Thread(
         target=_music_worker,
         kwargs={
             "emotion_queue": emotion_queue,
             "openai_api_key": openai_api_key,
             "openai_model": args.openai_model,
-            "suno_wait": args.suno_wait,
+            "openai_max_tokens": args.openai_max_tokens,
+            "suno_poll_interval_s": args.suno_poll_interval,
+            "player": player,
         },
         daemon=True,
     )
     worker.start()
 
+    last_enqueued_emotion: Optional[str] = None
+
     def on_observation(observation: EmotionObservation) -> None:
+        nonlocal last_enqueued_emotion
         triggered = detector.observe(observation)
-        if triggered:
+        if triggered and triggered != last_enqueued_emotion:
             print(
                 f"[EMOTION] stable change detected: {triggered} "
                 f"(>= {args.stable_seconds:.1f}s)"
             )
+            # Keep only the newest pending transition to avoid over-querying OpenAI.
+            while True:
+                try:
+                    pending = emotion_queue.get_nowait()
+                    if pending == "__STOP__":
+                        emotion_queue.put("__STOP__")
+                        break
+                except queue.Empty:
+                    break
             emotion_queue.put(triggered)
+            last_enqueued_emotion = triggered
 
     try:
         source = build_source_from_args(args)
@@ -331,6 +388,8 @@ def main() -> None:
             processor.close()
         if source is not None:
             source.release()
+        if player is not None:
+            player.close()
         cv2.destroyAllWindows()
 
 
