@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -29,6 +31,10 @@ def create_app() -> FastAPI:
     app.state.settings = settings
     app.state.session_store = InMemorySessionStore()
     app.state.cookie_signer = SessionCookieSigner(settings.session_secret)
+    logging.basicConfig(
+        level=logging.INFO if settings.spotify_debug else logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
     app.add_middleware(
         CORSMiddleware,

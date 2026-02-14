@@ -23,6 +23,7 @@ class Settings:
     spotify_api_base: str = "https://api.spotify.com/v1"
     spotify_accounts_base: str = "https://accounts.spotify.com"
     cookie_secure: bool = False
+    spotify_debug: bool = False
 
 
 def _load_dotenv_files() -> None:
@@ -60,4 +61,5 @@ def load_settings() -> Settings:
         spotify_accounts_base=_get_setting("SPOTIFY_ACCOUNTS_BASE")
         or "https://accounts.spotify.com",
         cookie_secure=_get_setting("COOKIE_SECURE").lower() in {"1", "true", "yes"},
+        spotify_debug=_get_setting("SPOTIFY_DEBUG").lower() in {"1", "true", "yes"},
     )

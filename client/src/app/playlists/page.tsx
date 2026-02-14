@@ -51,6 +51,10 @@ export default function PlaylistsPage() {
     );
   }
 
+  const accessiblePlaylists = playlists.filter(
+    (p) => Boolean(p.owner_id) && Boolean(me?.id) && p.owner_id === me?.id
+  );
+
   return (
     <main className="container">
       <div className="card">
@@ -66,12 +70,12 @@ export default function PlaylistsPage() {
           Logout
         </button>
       </div>
-      {playlists.length === 0 ? (
+      {accessiblePlaylists.length === 0 ? (
         <div className="card">
-          <p className="muted">No playlists found.</p>
+          <p className="muted">No track-accessible playlists found for this account.</p>
         </div>
       ) : (
-        playlists.map((p) => (
+        accessiblePlaylists.map((p) => (
           <div key={p.id} className="card">
             <h3>{p.name}</h3>
             <p className="muted">

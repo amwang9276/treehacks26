@@ -1,24 +1,28 @@
 "use client";
 
 import Link from "next/link";
+import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { getPlaylistTracks, type Track } from "../../../lib/api";
 
-export default function TracksPage({
-  params,
-}: {
-  params: { playlistId: string };
-}) {
+export default function TracksPage() {
+  const params = useParams<{ playlistId: string }>();
+  const playlistId = params?.playlistId ?? "";
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!playlistId) {
+      setError("Missing playlist id in route.");
+      setLoading(false);
+      return;
+    }
     let mounted = true;
     async function load() {
       try {
-        const page = await getPlaylistTracks(params.playlistId);
+        const page = await getPlaylistTracks(playlistId);
         if (!mounted) return;
         setTracks(page.items);
       } catch (err) {
@@ -32,7 +36,7 @@ export default function TracksPage({
     return () => {
       mounted = false;
     };
-  }, [params.playlistId]);
+  }, [playlistId]);
 
   return (
     <main className="container">

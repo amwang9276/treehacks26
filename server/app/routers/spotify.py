@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Dict
 
@@ -12,6 +13,7 @@ from ..spotify_oauth import SpotifyAuthError, refresh_access_token
 
 
 router = APIRouter(tags=["spotify"])
+logger = logging.getLogger(__name__)
 
 
 def _settings(request: Request) -> Settings:
@@ -100,11 +102,26 @@ def playlists(
 ) -> Dict[str, Any]:
     sid, session = _get_session(request, settings, store, signer)
     session = _refresh_if_needed(sid, session, settings, store)
+    if settings.spotify_debug:
+        logger.info(
+            "Fetching playlists for user_id='%s' limit=%s offset=%s",
+            session.spotify_user_id,
+            limit,
+            offset,
+        )
     try:
         return get_user_playlists(
             settings, session.access_token, limit=limit, offset=offset
         )
     except SpotifyApiError as err:
+        if err.status_code == 401:
+            raise _error(401, "UNAUTHORIZED", str(err)) from err
+        if err.status_code == 403:
+            raise _error(
+                403,
+                "SPOTIFY_FORBIDDEN",
+                "Spotify denied playlist access for this account/app configuration.",
+            ) from err
         raise _error(502, "SPOTIFY_API_ERROR", str(err)) from err
 
 
@@ -120,9 +137,32 @@ def playlist_tracks(
 ) -> Dict[str, Any]:
     sid, session = _get_session(request, settings, store, signer)
     session = _refresh_if_needed(sid, session, settings, store)
+    if settings.spotify_debug:
+        logger.info(
+            "Fetching tracks for user_id='%s' playlist_id='%s' limit=%s offset=%s",
+            session.spotify_user_id,
+            playlist_id,
+            limit,
+            offset,
+        )
     try:
         return get_playlist_tracks(
             settings, session.access_token, playlist_id, limit=limit, offset=offset
         )
     except SpotifyApiError as err:
+        if settings.spotify_debug:
+            logger.warning(
+                "Tracks fetch failed for user_id='%s' playlist_id='%s': %s",
+                session.spotify_user_id,
+                playlist_id,
+                err,
+            )
+        if err.status_code == 401:
+            raise _error(401, "UNAUTHORIZED", str(err)) from err
+        if err.status_code == 403:
+            raise _error(
+                403,
+                "SPOTIFY_FORBIDDEN",
+                "Spotify denied playlist item access. Per Spotify docs, this endpoint may be restricted for playlists not accessible to the current user.",
+            ) from err
         raise _error(502, "SPOTIFY_API_ERROR", str(err)) from err

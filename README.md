@@ -129,3 +129,8 @@ npm run dev
 Open `http://localhost:3000`.
 In Spotify dashboard, add redirect URI exactly as:
 `http://127.0.0.1:3000/callback`
+
+Notes on playlist tracks:
+1. Backend calls Spotify `GET /v1/playlists/{playlist_id}/items` (Get a Playlist's Items).
+2. If Spotify returns `403 Forbidden`, the app now surfaces this as `SPOTIFY_FORBIDDEN` with a clear message.
+3. Spotify may restrict this endpoint based on playlist access; in that case, use playlists your signed-in user can access.

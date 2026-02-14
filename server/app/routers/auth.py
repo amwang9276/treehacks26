@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import secrets
 import time
 from typing import Any, Optional
@@ -19,6 +20,7 @@ from ..spotify_oauth import (
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+logger = logging.getLogger(__name__)
 
 
 def _settings(request: Request) -> Settings:
@@ -47,6 +49,12 @@ def login(
         OAuthState(state=state, code_verifier=verifier, created_at_s=time.time()),
     )
     url = build_authorize_url(settings, state=state, code_challenge=challenge)
+    if settings.spotify_debug:
+        logger.info(
+            "Spotify login redirect prepared. scopes='%s' redirect_uri='%s'",
+            settings.spotify_scopes,
+            settings.spotify_redirect_uri,
+        )
     resp = RedirectResponse(url=url, status_code=302)
     resp.set_cookie(
         key=f"{settings.session_cookie_name}_tmp",
@@ -76,6 +84,12 @@ def callback(
         raise HTTPException(status_code=401, detail={"error": {"code": "UNAUTHORIZED", "message": "Invalid OAuth state."}})
     try:
         tokens = exchange_code_for_tokens(settings, code=code, code_verifier=oauth_state.code_verifier)
+        if settings.spotify_debug:
+            logger.info(
+                "Spotify token exchange complete. token_scope='%s' expires_in=%s",
+                tokens.get("scope"),
+                tokens.get("expires_in"),
+            )
         profile = get_current_user_profile(settings, tokens["access_token"])
     except (SpotifyAuthError, SpotifyApiError) as err:
         raise HTTPException(status_code=502, detail={"error": {"code": "SPOTIFY_API_ERROR", "message": str(err)}}) from err
