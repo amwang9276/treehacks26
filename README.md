@@ -1,6 +1,6 @@
 # treehacks26
 
-## Linux
+## Linux Setup
 
 ### Setup (pip + venv)
 
@@ -20,7 +20,7 @@ python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
-## Windows
+## Windows Setup
 
 ```bash
 python -m venv .venv
@@ -29,8 +29,16 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-## Run Emotion CV
+## Running The Repo
+
+If using your local, laptop native webcam, run:
 
 ```bash
-python emotions.py --source-type local --index 0
+python main.py --source-type local --index 0
+```
+
+If you want to use a webcam attachment, run:
+
+```bash
+python main.py --source-type local --index 0
 ```
