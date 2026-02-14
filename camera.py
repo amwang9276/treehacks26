@@ -329,4 +329,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # use python camera.py --source-type local --index 0 for local
+    # use python camera.py --source-type local --index 1 for webcam
     main()
