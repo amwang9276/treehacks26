@@ -1,23 +1,27 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import queue
+import re
 import sys
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import cv2
 from openai import OpenAI
+from elasticsearch import Elasticsearch
 
 from camera import FramePacket, build_local_camera_help_text, build_source_from_args
 from context_shot import ContextShot
 from facial_emotions import EmotionObservation, EmotionProcessor
 from fusion import SensorFusion, SensorState
 from play_music import MusicPlaybackError, MusicPlayer
+from mulan import DEFAULT_MULAN_MODEL_ID, MuLanEmbedError, MuLanEmbedder
 from suno_gen_music import SunoError, SunoGenerationResult, generate_from_prompt
 from voice import VoiceObservation, VoiceProcessor
 
@@ -138,19 +142,299 @@ def _choose_track_url(result: SunoGenerationResult) -> Optional[str]:
 _MusicQueueItem = Union[str, tuple]
 
 
+@dataclass
+class LocalSongEmbedding:
+    key: str
+    path: Path
+    vector: "np.ndarray"
+
+
+def _parse_bool_arg(value: str) -> bool:
+    lowered = (value or "").strip().lower()
+    if lowered in {"1", "true", "yes", "y"}:
+        return True
+    if lowered in {"0", "false", "no", "n"}:
+        return False
+    raise argparse.ArgumentTypeError(
+        "Expected boolean value for --generate (true/false)."
+    )
+
+
+def _resolve_setting(name: str, default: str) -> str:
+    value = os.environ.get(name)
+    if value:
+        return value
+    file_value = _read_env_file().get(name)
+    if file_value:
+        return file_value
+    return default
+
+
+def _resolve_bool_setting(name: str, default: bool) -> bool:
+    raw = _resolve_setting(name, str(default).lower()).strip().lower()
+    return raw in {"1", "true", "yes"}
+
+
+def _normalize_key(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")
+
+
+def _score_to_unit_interval(cosine_score: float) -> float:
+    return max(0.0, min(1.0, (cosine_score + 1.0) / 2.0))
+
+
+def _weighted_blend_scores(
+    mulan_scores: Dict[str, float],
+    elastic_scores: Dict[str, float],
+    *,
+    mulan_weight: float = 0.5,
+    elastic_weight: float = 0.5,
+) -> Dict[str, float]:
+    total = mulan_weight + elastic_weight
+    if total <= 0:
+        raise ValueError("Weights must sum to a positive value.")
+    mw = mulan_weight / total
+    ew = elastic_weight / total
+    return {
+        key: mw * mulan_scores.get(key, 0.0) + ew * elastic_scores.get(key, 0.0)
+        for key in (set(mulan_scores) | set(elastic_scores))
+    }
+
+
+def _build_es_client(es_url: str) -> Elasticsearch:
+    api_key = _resolve_setting("ELASTICSEARCH_API_KEY", "")
+    username = _resolve_setting("ELASTICSEARCH_USERNAME", "")
+    password = _resolve_setting("ELASTICSEARCH_PASSWORD", "")
+    verify_certs = _resolve_bool_setting("ELASTICSEARCH_VERIFY_CERTS", True)
+    kwargs: Dict[str, object] = {"verify_certs": verify_certs}
+    if api_key:
+        kwargs["api_key"] = api_key
+    elif username and password:
+        kwargs["basic_auth"] = (username, password)
+    return Elasticsearch(es_url, **kwargs)
+
+
+def _load_local_song_embeddings(
+    *,
+    songs_dir: str,
+    model_id: str,
+    cache_dir: str,
+    use_cache: bool,
+    device: str = "cpu",
+) -> Tuple[MuLanEmbedder, List[LocalSongEmbedding]]:
+    import numpy as np
+
+    directory = Path(songs_dir).resolve()
+    patterns = ("*.mp3", "*.wav", "*.m4a", "*.flac", "*.ogg")
+    files: List[Path] = []
+    for pattern in patterns:
+        files.extend(sorted(directory.glob(pattern)))
+    if not files:
+        raise RuntimeError(f"No song files found in {directory}")
+
+    resolved_cache_dir = Path(cache_dir).resolve()
+    resolved_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def cache_key_for_path(path: Path, sample_rate: int) -> str:
+        stat = path.stat()
+        key_src = (
+            f"path={path.resolve()}|size={stat.st_size}|mtime_ns={stat.st_mtime_ns}"
+            f"|model={model_id}|sr={sample_rate}"
+        )
+        return hashlib.sha256(key_src.encode("utf-8")).hexdigest()
+
+    def try_load_cached_vector(path: Path, sample_rate: int) -> Optional["np.ndarray"]:
+        if not use_cache:
+            return None
+        key = cache_key_for_path(path, sample_rate)
+        fpath = resolved_cache_dir / f"{key}.npy"
+        if not fpath.exists():
+            return None
+        try:
+            vec = np.load(fpath)
+        except Exception:
+            return None
+        if not isinstance(vec, np.ndarray) or vec.ndim != 1 or vec.size == 0:
+            return None
+        return vec.astype(np.float32)
+
+    def save_cached_vector(path: Path, sample_rate: int, vector: "np.ndarray") -> None:
+        if not use_cache:
+            return
+        key = cache_key_for_path(path, sample_rate)
+        fpath = resolved_cache_dir / f"{key}.npy"
+        np.save(fpath, vector.astype(np.float32))
+
+    print(
+        f"[RETRIEVAL] starting song embedding calculation: "
+        f"model='{model_id}' songs_dir='{directory}' files={len(files)}"
+    )
+    embedder = MuLanEmbedder(model_id=model_id, device=device)
+    embeddings: List[LocalSongEmbedding] = []
+    cache_hits = 0
+    embedded_now = 0
+    for path in files:
+        vec = try_load_cached_vector(path, embedder.sample_rate)
+        if vec is not None:
+            cache_hits += 1
+        else:
+            vec = embedder.embed_audio_file(str(path))
+            embedded_now += 1
+            save_cached_vector(path, embedder.sample_rate, vec)
+        if not isinstance(vec, np.ndarray):
+            continue
+        embeddings.append(
+            LocalSongEmbedding(key=_normalize_key(path.stem), path=path, vector=vec)
+        )
+    if not embeddings:
+        raise RuntimeError("No song embeddings could be generated.")
+    print(
+        f"[RETRIEVAL] song embeddings ready: embedded={len(embeddings)} "
+        f"model='{model_id}' cache_hits={cache_hits} embedded_now={embedded_now} "
+        f"cache_dir='{resolved_cache_dir}'"
+    )
+    return embedder, embeddings
+
+
+def _mulan_topk_scores(
+    query_vector: "np.ndarray",
+    songs: List[LocalSongEmbedding],
+    *,
+    top_k: int,
+) -> Dict[str, float]:
+    import numpy as np
+
+    ranked = sorted(
+        (
+            (
+                float(np.dot(query_vector, song.vector))
+                / max(float(np.linalg.norm(query_vector) * np.linalg.norm(song.vector)), 1e-8),
+                song,
+            )
+            for song in songs
+        ),
+        key=lambda x: x[0],
+        reverse=True,
+    )
+    result: Dict[str, float] = {}
+    for cosine_score, song in ranked[: max(1, top_k)]:
+        result[song.key] = _score_to_unit_interval(cosine_score)
+    return result
+
+
+def _elastic_topk_scores(
+    es_client: Elasticsearch,
+    *,
+    es_index: str,
+    query_text: str,
+    top_k: int,
+) -> Dict[str, float]:
+    if not es_client.indices.exists(index=es_index):
+        return {}
+    resp = es_client.search(
+        index=es_index,
+        body={
+            "query": {
+                "multi_match": {
+                    "query": query_text,
+                    "fields": ["lyrics", "song_title^2"],
+                }
+            },
+            "_source": ["song_key", "song_title"],
+            "size": max(1, top_k),
+        },
+    )
+    hits = (resp.get("hits") or {}).get("hits", [])
+    if not hits:
+        return {}
+    max_score = float(hits[0].get("_score") or 1.0)
+    if max_score <= 0:
+        max_score = 1.0
+    out: Dict[str, float] = {}
+    for hit in hits[: max(1, top_k)]:
+        src = hit.get("_source") or {}
+        raw_key = str(src.get("song_key") or src.get("song_title") or hit.get("_id") or "")
+        out[_normalize_key(raw_key)] = max(
+            0.0, min(1.0, float(hit.get("_score") or 0.0) / max_score)
+        )
+    return out
+
+
+def _select_song_from_query(
+    *,
+    query_text: str,
+    embedder: MuLanEmbedder,
+    songs: List[LocalSongEmbedding],
+    es_client: Optional[Elasticsearch],
+    es_index: str,
+    top_k: int = 3,
+) -> Tuple[Optional[Path], Dict[str, float], Dict[str, float], Dict[str, float]]:
+    print(
+        f"[RETRIEVAL] starting query calculation (MuLan + Elasticsearch): "
+        f"query='{query_text}' top_k={top_k} es_index='{es_index}'"
+    )
+    query_vector = embedder.embed_text(query_text)
+    mulan_scores = _mulan_topk_scores(query_vector, songs, top_k=top_k)
+    elastic_scores: Dict[str, float] = {}
+    if es_client is not None:
+        try:
+            elastic_scores = _elastic_topk_scores(
+                es_client, es_index=es_index, query_text=query_text, top_k=top_k
+            )
+        except Exception as err:
+            print(f"[MUSIC] elastic retrieval warning: {err}", file=sys.stderr)
+    blended = _weighted_blend_scores(
+        mulan_scores, elastic_scores, mulan_weight=0.5, elastic_weight=0.5
+    )
+    if not blended:
+        return None, mulan_scores, elastic_scores, blended
+    best_key = max(blended.items(), key=lambda x: x[1])[0]
+    path_map = {song.key: song.path for song in songs}
+    return path_map.get(best_key), mulan_scores, elastic_scores, blended
+
+
 def _music_worker(
     emotion_queue: "queue.Queue[_MusicQueueItem]",
     *,
+    generate: bool,
     openai_api_key: Optional[str],
     openai_model: str,
     openai_max_tokens: int,
     suno_poll_interval_s: float,
     player: Optional[MusicPlayer],
+    songs_dir: str,
+    es_url: str,
+    es_index: str,
+    retrieval_top_k: int,
+    retrieval_model_id: str,
+    retrieval_cache_dir: str,
+    retrieval_no_cache: bool,
 ) -> None:
     last_processed_emotion: Optional[str] = None
     client: Optional[OpenAI] = None
+    retrieval_embedder: Optional[MuLanEmbedder] = None
+    retrieval_songs: List[LocalSongEmbedding] = []
+    retrieval_es_client: Optional[Elasticsearch] = None
     if openai_api_key:
         client = OpenAI(api_key=openai_api_key)
+    if not generate:
+        try:
+            retrieval_embedder, retrieval_songs = _load_local_song_embeddings(
+                songs_dir=songs_dir,
+                model_id=retrieval_model_id,
+                cache_dir=retrieval_cache_dir,
+                use_cache=not retrieval_no_cache,
+                device="cpu",
+            )
+            retrieval_es_client = _build_es_client(es_url)
+            print(
+                f"[MUSIC] retrieval mode ready: songs={len(retrieval_songs)} "
+                f"es_index='{es_index}'"
+            )
+        except (MuLanEmbedError, RuntimeError) as err:
+            print(f"[MUSIC] retrieval setup error: {err}", file=sys.stderr)
+        except Exception as err:
+            print(f"[MUSIC] retrieval setup warning: {err}", file=sys.stderr)
 
     while True:
         item = emotion_queue.get()
@@ -163,40 +447,72 @@ def _music_worker(
         if emotion == last_processed_emotion:
             continue
         try:
-            if client is None:
-                raise RuntimeError("OPENAI_API_KEY is required to generate prompts.")
-            prompt = generate_suno_prompt_for_emotion(
-                emotion,
-                client=client,
-                model=openai_model,
-                max_tokens=openai_max_tokens,
-                context=context,
-            )
-            prompt_source = "openai"
-
-            result = generate_from_prompt(
-                prompt,
-                wait=True,
-                poll_interval_s=max(0.5, suno_poll_interval_s),
-            )
-            url = _choose_track_url(result)
-            if not url:
-                print(
-                    f"[MUSIC] task_id={result.task_id} returned no playable url.",
-                    file=sys.stderr,
+            if client is not None:
+                prompt = generate_suno_prompt_for_emotion(
+                    emotion,
+                    client=client,
+                    model=openai_model,
+                    max_tokens=openai_max_tokens,
+                    context=context,
                 )
-                continue
-            if player is None:
-                print(
-                    f"[MUSIC] emotion={emotion} prompt_source={prompt_source} "
-                    f"task_id={result.task_id} playable_url={url} (playback disabled)"
-                )
+                prompt_source = "openai"
             else:
-                played_file = player.play_url(url)
-                print(
-                    f"[MUSIC] emotion={emotion} prompt_source={prompt_source} "
-                    f"task_id={result.task_id} playing={played_file}"
+                prompt = f"{emotion} mood music"
+                prompt_source = "emotion-fallback"
+
+            if generate:
+                result = generate_from_prompt(
+                    prompt,
+                    wait=True,
+                    poll_interval_s=max(0.5, suno_poll_interval_s),
                 )
+                url = _choose_track_url(result)
+                if not url:
+                    print(
+                        f"[MUSIC] task_id={result.task_id} returned no playable url.",
+                        file=sys.stderr,
+                    )
+                    continue
+                if player is None:
+                    print(
+                        f"[MUSIC] emotion={emotion} prompt_source={prompt_source} "
+                        f"task_id={result.task_id} playable_url={url} (playback disabled)"
+                    )
+                else:
+                    played_file = player.play_url(url)
+                    print(
+                        f"[MUSIC] emotion={emotion} prompt_source={prompt_source} "
+                        f"task_id={result.task_id} playing={played_file}"
+                    )
+            else:
+                if retrieval_embedder is None or not retrieval_songs:
+                    raise RuntimeError("Retrieval mode not initialized; cannot select local songs.")
+                selected_path, mulan_scores, elastic_scores, blended_scores = _select_song_from_query(
+                    query_text=prompt,
+                    embedder=retrieval_embedder,
+                    songs=retrieval_songs,
+                    es_client=retrieval_es_client,
+                    es_index=es_index,
+                    top_k=max(1, retrieval_top_k),
+                )
+                print(f"[MUSIC] prompt='{prompt}'")
+                print(f"[MUSIC] mulan_top{retrieval_top_k}: {mulan_scores}")
+                print(f"[MUSIC] elastic_top{retrieval_top_k}: {elastic_scores}")
+                print(f"[MUSIC] blended_top{retrieval_top_k}: {blended_scores}")
+                if selected_path is None:
+                    print("[MUSIC] retrieval returned no playable local song.", file=sys.stderr)
+                    continue
+                if player is None:
+                    print(
+                        f"[MUSIC] emotion={emotion} prompt_source={prompt_source} "
+                        f"selected_song={selected_path} (playback disabled)"
+                    )
+                else:
+                    played_file = player.play_url(str(selected_path))
+                    print(
+                        f"[MUSIC] emotion={emotion} prompt_source={prompt_source} "
+                        f"selected_song={selected_path} playing={played_file}"
+                    )
             last_processed_emotion = emotion
         except MusicPlaybackError as err:
             print(f"[MUSIC] playback error for emotion '{emotion}': {err}", file=sys.stderr)
@@ -215,6 +531,15 @@ def parse_args() -> argparse.Namespace:
             "Run camera + emotion recognition and auto-generate/play Suno music "
             "when emotion changes and is stable for >= N seconds."
         )
+    )
+    parser.add_argument(
+        "--generate",
+        type=_parse_bool_arg,
+        default=True,
+        help=(
+            "If true, generate a new song with Suno. "
+            "If false, retrieve and play a local song using MuLan+Elasticsearch blend."
+        ),
     )
     parser.add_argument(
         "--source-type",
@@ -270,7 +595,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stable-seconds",
         type=float,
-        default=3.0,
+        default=1.0,
         help="Required stable duration before triggering music generation.",
     )
     parser.add_argument(
@@ -304,6 +629,48 @@ def parse_args() -> argparse.Namespace:
         help="Suno status polling interval in seconds (2-3s recommended).",
     )
     parser.add_argument(
+        "--songs-dir",
+        type=str,
+        default="songs",
+        help="Directory containing local songs used in retrieval mode.",
+    )
+    parser.add_argument(
+        "--retrieval-top-k",
+        type=int,
+        default=3,
+        help="Top-k candidates used when blending MuLan and Elasticsearch scores.",
+    )
+    parser.add_argument(
+        "--es-url",
+        type=str,
+        default=None,
+        help="Elasticsearch URL (defaults to ELASTICSEARCH_URL env/.env).",
+    )
+    parser.add_argument(
+        "--es-index",
+        type=str,
+        default=None,
+        help="Elasticsearch index for retrieval mode (defaults to ELASTICSEARCH_INDEX or 'lyrics').",
+    )
+    parser.add_argument(
+        "--mulan-model-id",
+        type=str,
+        default=None,
+        help="MuLan model id for retrieval mode.",
+    )
+    parser.add_argument(
+        "--retrieval-cache-dir",
+        type=str,
+        default=".cache/mulan_song_embeddings_main",
+        help="Cache directory for local song embeddings in retrieval mode.",
+    )
+    parser.add_argument(
+        "--retrieval-no-cache",
+        action="store_true",
+        default=False,
+        help="Disable embedding cache in retrieval mode.",
+    )
+    parser.add_argument(
         "--context-interval",
         type=float,
         default=1800,
@@ -312,8 +679,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--enable-voice",
         action="store_true",
-        default=False,
+        default=True,
         help="Enable voice capture and analysis.",
+    )
+    parser.add_argument(
+        "--disable-voice",
+        action="store_true",
+        default=False,
+        help="Disable voice capture and analysis.",
     )
     parser.add_argument(
         "--voice-chunk-duration",
@@ -338,6 +711,11 @@ def main() -> None:
     voice_processor: Optional[VoiceProcessor] = None
 
     openai_api_key = get_openai_api_key(args.openai_api_key)
+    es_url = args.es_url or _resolve_setting("ELASTICSEARCH_URL", "http://localhost:9200")
+    es_index = args.es_index or _resolve_setting("ELASTICSEARCH_INDEX", "lyrics")
+    mulan_model_id = args.mulan_model_id or _resolve_setting(
+        "MULAN_MODEL_ID", DEFAULT_MULAN_MODEL_ID
+    )
 
     # Shared OpenAI client for fusion and context shot modules
     openai_client: Optional[OpenAI] = None
@@ -358,6 +736,27 @@ def main() -> None:
         nonlocal latest_voice_observation
         with voice_lock:
             latest_voice_observation = obs
+        if not obs.is_speech:
+            print(
+                f"[VOICE] t={obs.timestamp_s:.1f} speech=False rms={obs.energy_rms:.4f}"
+            )
+            return
+        print(
+            f"[VOICE] t={obs.timestamp_s:.1f} speech=True rms={obs.energy_rms:.4f} "
+            f"prosody={obs.prosody_emotion} vocal_mood={obs.vocal_mood} "
+            f"vocal_mood_score={obs.vocal_mood_score:.2f} speech_rate={obs.speech_rate}"
+        )
+        if obs.transcript:
+            print(f"[VOICE] transcript: {obs.transcript}")
+        if obs.text_emotion:
+            print(
+                f"[VOICE] text_emotion: {obs.text_emotion} "
+                f"({obs.text_emotion_score:.2f})"
+            )
+        if obs.topics:
+            print(f"[VOICE] topics: {obs.topics}")
+        if obs.keywords:
+            print(f"[VOICE] keywords: {obs.keywords}")
 
 
     detector = StableEmotionChangeDetector(min_stable_seconds=args.stable_seconds)
@@ -368,7 +767,8 @@ def main() -> None:
         print(f"[MUSIC] playback disabled: {err}", file=sys.stderr)
         player = None
     # Initialize voice processor if enabled
-    if args.enable_voice:
+    voice_enabled = bool(args.enable_voice) and not bool(args.disable_voice)
+    if voice_enabled:
         voice_processor = VoiceProcessor(
             chunk_duration_s=args.voice_chunk_duration,
             silence_threshold_rms=args.voice_silence_threshold,
@@ -382,11 +782,19 @@ def main() -> None:
         target=_music_worker,
         kwargs={
             "emotion_queue": emotion_queue,
+            "generate": bool(args.generate),
             "openai_api_key": openai_api_key,
             "openai_model": args.openai_model,
             "openai_max_tokens": args.openai_max_tokens,
             "suno_poll_interval_s": args.suno_poll_interval,
             "player": player,
+            "songs_dir": args.songs_dir,
+            "es_url": es_url,
+            "es_index": es_index,
+            "retrieval_top_k": args.retrieval_top_k,
+            "retrieval_model_id": mulan_model_id,
+            "retrieval_cache_dir": args.retrieval_cache_dir,
+            "retrieval_no_cache": args.retrieval_no_cache,
         },
         daemon=True,
     )
