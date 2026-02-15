@@ -8,8 +8,8 @@ const int ledPins[NUM_LEDS] = {
 
 /*
 Grid layout (your color arrangement reference)
-g, b, r, 
-r, g, b, 
+g, b, r,
+r, g, b,
 b, r, g
 */
 
@@ -56,17 +56,35 @@ int moodBrightness[NUM_MOODS][NUM_LEDS] = {
 int ledBrightness[NUM_LEDS];
 
 void setup() {
+  Serial.begin(9600);
   for (int i = 0; i < NUM_LEDS; i++) {
     pinMode(ledPins[i], OUTPUT);
   }
 
   // Start on Mood 0
-  setMood(5);
+  setMood(0);
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    String input = Serial.readStringUntil('\n');
+    input.trim();
+    int mood = input.toInt();
+    if (mood >= 0 && mood < NUM_MOODS) {
+      setMood(mood);
+    }
+  }
 }
 
 void setMood(int moodIndex) {
   if (moodIndex < 0) moodIndex = 0;
   if (moodIndex >= NUM_MOODS) moodIndex = NUM_MOODS - 1;
+
+  Serial.print("[LAMP] Switching to mood ");
+  Serial.print(moodIndex);
+  Serial.print(" (from ");
+  Serial.print(currentMood);
+  Serial.println(")");
 
   currentMood = moodIndex;
 

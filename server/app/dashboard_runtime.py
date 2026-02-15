@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Deque, Dict, Iterator, Optional, Union
 
 import cv2
+import serial
 from openai import OpenAI
 
 from .config import Settings
@@ -303,6 +304,22 @@ class DashboardRuntime:
                 or repo_env.get("FFPLAY_PATH")
                 or cwd_env.get("FFPLAY_PATH")
             )
+            serial_port = (
+                os.environ.get("SERIAL_PORT")
+                or repo_env.get("SERIAL_PORT")
+                or cwd_env.get("SERIAL_PORT")
+                or "COM4"
+            )
+            lamp_serial: Optional[serial.Serial] = None
+            if serial_port:
+                try:
+                    lamp_serial = serial.Serial(serial_port, 9600, timeout=1)
+                    import time as _t
+                    _t.sleep(2)  # Arduino resets on serial open
+                    self._log("LAMP", f"connected on {serial_port}")
+                except Exception as err:
+                    self._log("LAMP", f"failed to open {serial_port}: {err}")
+                    lamp_serial = None
             songs_dir_path = self._repo_root() / "songs"
             retrieval_cache_dir_path = (
                 self._repo_root() / ".cache" / "mulan_song_embeddings_main"
@@ -495,6 +512,7 @@ class DashboardRuntime:
                         "retrieval_model_id": mulan_model_id,
                         "retrieval_cache_dir": str(retrieval_cache_dir_path),
                         "retrieval_no_cache": False,
+                        "lamp_serial": lamp_serial,
                     },
                     daemon=True,
                 )
@@ -552,6 +570,11 @@ class DashboardRuntime:
                 if player is not None:
                     try:
                         player.close()
+                    except Exception:
+                        pass
+                if lamp_serial is not None:
+                    try:
+                        lamp_serial.close()
                     except Exception:
                         pass
                 with self._lock:

@@ -50,8 +50,8 @@ class SensorFusion:
                         "You receive sensor data about a room. Produce exactly three sentences"
                         "describing the event or occasion, the mood of the collective, and the atmosphere"
                         "combining all available sensor inputs. No bullet points"
-                        "keep the descriptions succinct, informative, and to the point. From this, give an RGB"
-                        "color value which matches the description in the form of RGB:[VALUE]."
+                        "keep the descriptions succinct, informative, and to the point. From this, choose a single"
+                        "word description from : focus, happy, angry, romantic, calm, and sad, in the form COLOR:"
                     ),
                 },
                 {"role": "user", "content": prompt},

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 import cv2
+import serial
 from openai import OpenAI
 from elasticsearch import Elasticsearch
 
@@ -28,6 +29,36 @@ from voice import VoiceObservation, VoiceProcessor
 
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 DEFAULT_OPENAI_MAX_TOKENS = 48
+
+# Emotion-to-mood index mapping (matches colorchanging.ino)
+EMOTION_TO_MOOD: Dict[str, int] = {
+    "focus": 0,
+    "sad": 1,
+    "calm": 2,
+    "happy": 3,
+    "angry": 4,
+    "romantic": 5,
+}
+
+
+def _parse_color_emotion(text: str) -> Optional[str]:
+    """Extract the emotion word after 'COLOR:' in fusion output."""
+    match = re.search(r"COLOR:\s*(\w+)", text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip().lower()
+    return None
+
+
+def _send_lamp_mood(ser: serial.Serial, emotion: str) -> None:
+    """Send the mood index to the Arduino lamp over serial."""
+    mood_index = EMOTION_TO_MOOD.get(emotion)
+    if mood_index is None:
+        print(f"[LAMP] unknown emotion '{emotion}', skipping lamp update")
+        return
+    message = f"{mood_index}\n"
+    ser.write(message.encode("utf-8"))
+    ser.flush()
+    print(f"[LAMP] set mood={mood_index} ({emotion})")
 
 
 def _read_env_file(path: Path = Path(".env")) -> Dict[str, str]:
@@ -452,6 +483,7 @@ def _music_worker(
     retrieval_model_id: str,
     retrieval_cache_dir: str,
     retrieval_no_cache: bool,
+    lamp_serial: Optional[serial.Serial] = None,
 ) -> None:
     last_processed_signature: Optional[Tuple[str, bool]] = None
     client: Optional[OpenAI] = None
@@ -539,6 +571,15 @@ def _music_worker(
                 )
             else:
                 prompt = f"{emotion} mood music"
+
+            # Update lamp color based on fusion COLOR output
+            if lamp_serial is not None and context:
+                color_emotion = _parse_color_emotion(str(context))
+                if color_emotion:
+                    try:
+                        _send_lamp_mood(lamp_serial, color_emotion)
+                    except Exception as lamp_err:
+                        print(f"[LAMP] serial error: {lamp_err}", file=sys.stderr)
 
             if use_generate:
                 result = generate_from_prompt(
@@ -776,6 +817,12 @@ def parse_args() -> argparse.Namespace:
         help="Interval in seconds between room context captures (default: 1800 = 30 min).",
     )
     parser.add_argument(
+        "--serial-port",
+        type=str,
+        default="COM4",
+        help="Serial port for Arduino lamp control (e.g., COM5 on Windows, /dev/ttyUSB0 on Linux).",
+    )
+    parser.add_argument(
         "--enable-voice",
         action="store_true",
         default=True,
@@ -877,6 +924,17 @@ def main() -> None:
         )
         voice_processor.start()
 
+    # Open serial connection to Arduino lamp if port specified
+    lamp_serial: Optional[serial.Serial] = None
+    if args.serial_port:
+        try:
+            lamp_serial = serial.Serial(args.serial_port, 9600, timeout=1)
+            time.sleep(2)  # Arduino resets on serial open
+            print(f"[LAMP] connected on {args.serial_port}")
+        except Exception as err:
+            print(f"[LAMP] failed to open {args.serial_port}: {err}", file=sys.stderr)
+            lamp_serial = None
+
     worker = threading.Thread(
         target=_music_worker,
         kwargs={
@@ -894,6 +952,7 @@ def main() -> None:
             "retrieval_model_id": mulan_model_id,
             "retrieval_cache_dir": args.retrieval_cache_dir,
             "retrieval_no_cache": args.retrieval_no_cache,
+            "lamp_serial": lamp_serial,
         },
         daemon=True,
     )
@@ -1016,6 +1075,8 @@ def main() -> None:
             processor.close()
         if source is not None:
             source.release()
+        if lamp_serial is not None:
+            lamp_serial.close()
         if player is not None:
             player.close()
         cv2.destroyAllWindows()
