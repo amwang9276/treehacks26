@@ -3,6 +3,6 @@
   {"query": "party groovy music", "expected": "party_rock_anthem_lmfao"},
   {"query": "sad emotional ballad", "expected": "dancing_with_your_ghost_sasha"},
   {"query": "calm focus no-lyrics study lofi", "expected": "ladyfingers_herb"},
-  {"query": "romantic serenade music", "expected": "perfect_ed"},
+  {"query": "romantic slow-dance music", "expected": "perfect_ed"},
   {"query": "angry loud music", "expected": "go_to_war_nothing"}
 ]
