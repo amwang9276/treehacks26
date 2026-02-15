@@ -679,8 +679,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--enable-voice",
         action="store_true",
-        default=False,
+        default=True,
         help="Enable voice capture and analysis.",
+    )
+    parser.add_argument(
+        "--disable-voice",
+        action="store_true",
+        default=False,
+        help="Disable voice capture and analysis.",
     )
     parser.add_argument(
         "--voice-chunk-duration",
@@ -730,6 +736,27 @@ def main() -> None:
         nonlocal latest_voice_observation
         with voice_lock:
             latest_voice_observation = obs
+        if not obs.is_speech:
+            print(
+                f"[VOICE] t={obs.timestamp_s:.1f} speech=False rms={obs.energy_rms:.4f}"
+            )
+            return
+        print(
+            f"[VOICE] t={obs.timestamp_s:.1f} speech=True rms={obs.energy_rms:.4f} "
+            f"prosody={obs.prosody_emotion} vocal_mood={obs.vocal_mood} "
+            f"vocal_mood_score={obs.vocal_mood_score:.2f} speech_rate={obs.speech_rate}"
+        )
+        if obs.transcript:
+            print(f"[VOICE] transcript: {obs.transcript}")
+        if obs.text_emotion:
+            print(
+                f"[VOICE] text_emotion: {obs.text_emotion} "
+                f"({obs.text_emotion_score:.2f})"
+            )
+        if obs.topics:
+            print(f"[VOICE] topics: {obs.topics}")
+        if obs.keywords:
+            print(f"[VOICE] keywords: {obs.keywords}")
 
 
     detector = StableEmotionChangeDetector(min_stable_seconds=args.stable_seconds)
@@ -740,7 +767,8 @@ def main() -> None:
         print(f"[MUSIC] playback disabled: {err}", file=sys.stderr)
         player = None
     # Initialize voice processor if enabled
-    if args.enable_voice:
+    voice_enabled = bool(args.enable_voice) and not bool(args.disable_voice)
+    if voice_enabled:
         voice_processor = VoiceProcessor(
             chunk_duration_s=args.voice_chunk_duration,
             silence_threshold_rms=args.voice_silence_threshold,
