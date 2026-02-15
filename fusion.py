@@ -48,8 +48,9 @@ class SensorFusion:
                     "role": "system",
                     "content": (
                         "You receive sensor data about a room. Produce exactly 5 sentences "
-                        "describing the scene, mood, and atmosphere, combining all available "
-                        "sensor inputs. No markdown, no bullet points."
+                        "describing the event or occasion, the mood of the collective, and the atmosphere"
+                        "combining all available sensor inputs. No bullet points"
+                        "keep the descriptions succinct, informative, and to the point."
                     ),
                 },
                 {"role": "user", "content": prompt},
