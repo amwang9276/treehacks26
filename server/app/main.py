@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from .config import ConfigError, load_settings
 from .routers.auth import router as auth_router
+from .routers.camera import router as camera_router
 from .routers.semantic import router as semantic_router
 from .routers.spotify import router as spotify_router
 from .semantic_service import SemanticService
@@ -52,6 +53,7 @@ def create_app() -> FastAPI:
         return {"ok": True}
 
     app.include_router(auth_router)
+    app.include_router(camera_router)
     app.include_router(spotify_router)
     app.include_router(semantic_router)
     return app

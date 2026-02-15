@@ -56,3 +56,15 @@ a {
   background: #0f6fff;
   transition: width 300ms ease;
 }
+
+.source-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 900px) {
+  .source-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}

@@ -7,3 +7,6 @@ transformers>=4.41,<5.0
 librosa>=0.10,<1.0
 elasticsearch>=8.14,<9.0
 muq
+opencv-python>=4.9,<5.0
+mediapipe>=0.10.14,<0.11
+Pillow>=10.0,<12.0
