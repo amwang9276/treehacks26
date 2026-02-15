@@ -71,6 +71,9 @@ class DashboardRuntime:
         self._logs: Dict[str, Deque[str]] = {}
         self._max_logs_per_tag = 120
         self._generate_mode = True
+        self._emotion_queue: Optional["queue.Queue[_MusicQueueItem]"] = None
+        self._latest_stable_emotion: Optional[str] = None
+        self._latest_fusion_context: Optional[str] = None
 
     def _repo_root(self) -> Path:
         # server/app/dashboard_runtime.py -> server/app -> server -> repo root
@@ -134,6 +137,9 @@ class DashboardRuntime:
                 return {"running": True, "message": "already running"}
             self._running = True
             self._generate_mode = bool(generate)
+            self._emotion_queue = None
+            self._latest_stable_emotion = None
+            self._latest_fusion_context = None
             self._logs.clear()
             self._latest_jpeg = None
             self._stop_event.clear()
@@ -153,14 +159,32 @@ class DashboardRuntime:
             thread.join(timeout=2.0)
         with self._lock:
             self._running = False
+            self._emotion_queue = None
         return {"running": False, "message": "stopped"}
 
     def set_generate_mode(self, generate: bool) -> Dict[str, object]:
         with self._lock:
             self._generate_mode = bool(generate)
             running = self._running
+            emotion_queue = self._emotion_queue
+            last_emotion = self._latest_stable_emotion
+            last_context = self._latest_fusion_context
         mode_label = "suno" if generate else "spotify retrieval"
         self._log("MUSIC", f"mode switched: {mode_label}")
+        if running and emotion_queue is not None and last_emotion:
+            while True:
+                try:
+                    pending = emotion_queue.get_nowait()
+                    if pending == "__STOP__":
+                        emotion_queue.put("__STOP__")
+                        break
+                except queue.Empty:
+                    break
+            emotion_queue.put((last_emotion, last_context, bool(generate)))
+            self._log(
+                "MUSIC",
+                f"recalculating music immediately for stable emotion='{last_emotion}'",
+            )
         return {"running": running, "generate": bool(generate), "mode": mode_label}
 
     def get_generate_mode(self) -> bool:
@@ -244,6 +268,8 @@ class DashboardRuntime:
             voice_processor = None
             worker = None
             emotion_queue: "queue.Queue[_MusicQueueItem]" = queue.Queue()
+            with self._lock:
+                self._emotion_queue = emotion_queue
 
             # Env/settings shared with main defaults.
             # Read repo-root .env explicitly because server cwd is often `server/`.
@@ -430,6 +456,9 @@ class DashboardRuntime:
                     except queue.Empty:
                         break
                 emotion_queue.put((triggered, fusion_context, self.get_generate_mode()))
+                with self._lock:
+                    self._latest_stable_emotion = triggered
+                    self._latest_fusion_context = fusion_context
                 last_enqueued_emotion = triggered
 
             try:
@@ -527,4 +556,5 @@ class DashboardRuntime:
                         pass
                 with self._lock:
                     self._running = False
+                    self._emotion_queue = None
                 self._log("SYSTEM", "Dashboard runtime stopped")
