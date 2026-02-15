@@ -78,6 +78,15 @@ target/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# Frontend artifacts
+client/node_modules/
+client/.next/
+client/out/
+client/.env.local
+
+# Server local env
+server/.env
+
 # IPython
 profile_default/
 ipython_config.py

@@ -128,7 +128,7 @@ def create_generation_task(
     api_key: Optional[str] = None,
     base_url: str = DEFAULT_BASE_URL,
     model: str = "",
-    instrumental: bool = False,
+    instrumental: bool = True,
     custom_mode: bool = False,
     callback_url: Optional[str] = None,
     tags: str = "",
@@ -139,10 +139,11 @@ def create_generation_task(
 ) -> str:
     key = get_suno_api_key(api_key)
     effective_base_url = os.environ.get("SUNO_BASE_URL", base_url).strip()
+    # Force instrumental generation to disable vocals/lyrics.
     body: Dict[str, Any] = {
         "topic": prompt,
         "tags": tags,
-        "make_instrumental": instrumental,
+        "make_instrumental": True,
     }
     if negative_tags:
         body["negative_tags"] = negative_tags
@@ -258,7 +259,7 @@ def generate_music(
     api_key: Optional[str] = None,
     base_url: str = DEFAULT_BASE_URL,
     model: str = "",
-    instrumental: bool = False,
+    instrumental: bool = True,
     custom_mode: bool = False,
     callback_url: Optional[str] = None,
     tags: str = "",

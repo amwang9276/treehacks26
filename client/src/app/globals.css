@@ -1,0 +1,58 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  background: #f5f7fb;
+  color: #101828;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.card {
+  background: #fff;
+  border: 1px solid #e7eaf0;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+.btn {
+  display: inline-block;
+  border-radius: 8px;
+  padding: 10px 14px;
+  border: none;
+  background: #0f6fff;
+  color: #fff;
+  cursor: pointer;
+}
+
+.muted {
+  color: #667085;
+}
+
+.progress-track {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: #e7eaf0;
+  overflow: hidden;
+  margin: 8px 0 12px;
+}
+
+.progress-fill {
+  height: 100%;
+  background: #0f6fff;
+  transition: width 300ms ease;
+}

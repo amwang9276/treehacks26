@@ -16,7 +16,21 @@ dependencies = [
   "transformers>=4.41,<5.0",
   "Pillow>=10.0,<12.0",
   "openai>=1.40,<2.0",
+  "librosa>=0.10,<1.0",
+  "elasticsearch>=8.14,<9.0",
+  "muq",
 ]
 
 [tool.setuptools]
-py-modules = ["camera", "emotions", "suno", "music", "main"]
+py-modules = [
+  "camera",
+  "emotions",
+  "suno",
+  "music",
+  "main",
+  "embed",
+  "spotify_ingest",
+  "audio_fetch",
+  "mulan_embed",
+  "es_index",
+]
