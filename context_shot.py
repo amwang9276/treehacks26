@@ -47,7 +47,7 @@ class ContextShot:
                     "role": "system",
                     "content": (
                         "Describe what you see in this room photo in 4 succinct bullet points."
-                        "Focus on the setting, the occassion, people present,"
+                        "Focus on the setting, the occassion, the number of people present,"
                         "activities, and lighting."
                     ),
                 },

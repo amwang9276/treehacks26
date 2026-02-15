@@ -130,7 +130,10 @@ def callback(
                 err,
             )
     cookie_value = signer.dumps(sid)
-    resp = RedirectResponse(url=f"{settings.client_origin}/playlists", status_code=302)
+    resp = RedirectResponse(
+        url=f"{settings.client_origin}/dashboard?spotify_connected=1&mode=spotify",
+        status_code=302,
+    )
     resp.set_cookie(
         key=settings.session_cookie_name,
         value=cookie_value,

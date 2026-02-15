@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from elasticsearch import Elasticsearch
+from elasticsearch import helpers as es_helpers
 from elasticsearch.exceptions import ConnectionError as ESConnectionError
 from elasticsearch.exceptions import NotFoundError
 
@@ -286,7 +287,8 @@ def upload_lyrics_folder_to_index(
     *,
     index_name: str = "lyrics",
     lyrics_dir: Optional[str] = None,
-) -> int:
+    sync_delete: bool = True,
+) -> tuple[int, int]:
     client = _build_client(es_url)
     if not client.ping():
         raise ESIndexError(f"Elasticsearch ping failed for {es_url}")
@@ -299,11 +301,13 @@ def upload_lyrics_folder_to_index(
 
     txt_files = sorted(ldir.glob("*.txt"))
     uploaded = 0
+    local_keys: set[str] = set()
     now = datetime.now(timezone.utc).isoformat()
     for txt_path in txt_files:
         key = _slugify(txt_path.stem)
         if not key:
             continue
+        local_keys.add(key)
         try:
             lyrics_text = txt_path.read_text(encoding="utf-8").strip()
         except UnicodeDecodeError:
@@ -324,7 +328,26 @@ def upload_lyrics_folder_to_index(
             doc["created_at"] = now
         client.index(index=index_name, id=key, document=doc)
         uploaded += 1
-    return uploaded
+
+    deleted = 0
+    if sync_delete:
+        stale_ids: List[str] = []
+        scan_iter = es_helpers.scan(
+            client,
+            index=index_name,
+            query={"query": {"match_all": {}}},
+            _source=False,
+        )
+        for hit in scan_iter:
+            doc_id = str(hit.get("_id") or "")
+            if doc_id and doc_id not in local_keys:
+                stale_ids.append(doc_id)
+
+        for doc_id in stale_ids:
+            client.delete(index=index_name, id=doc_id, ignore=[404])
+            deleted += 1
+
+    return uploaded, deleted
 
 
 if __name__ == "__main__":
@@ -347,16 +370,24 @@ if __name__ == "__main__":
         default=os.environ.get("LYRICS_DIR", "lyrics"),
         help="Directory containing .txt lyric files.",
     )
+    parser.add_argument(
+        "--no-sync-delete",
+        action="store_true",
+        default=False,
+        help="Do not delete index docs that no longer have a matching local lyric file.",
+    )
     args = parser.parse_args()
     try:
-        count = upload_lyrics_folder_to_index(
+        uploaded, deleted = upload_lyrics_folder_to_index(
             args.es_url,
             index_name=args.index_name,
             lyrics_dir=args.lyrics_dir,
+            sync_delete=not args.no_sync_delete,
         )
         print(
-            f"[LYRICS] Uploaded/updated {count} lyric documents "
-            f"to index '{args.index_name}'."
+            f"[LYRICS] Uploaded/updated {uploaded} lyric documents, "
+            f"deleted {deleted} stale documents "
+            f"from index '{args.index_name}'."
         )
     except ESIndexError as err:
         raise SystemExit(f"[ERROR] {err}")

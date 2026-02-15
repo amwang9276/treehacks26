@@ -187,7 +187,11 @@ class SemanticService:
             sys.path.insert(0, root)
         try:
             from audio_fetch import AudioFetchError, fetch_preview_audio  # type: ignore
-            from mulan_embed import MuLanEmbedder  # type: ignore
+            try:
+                from mulan import MuLanEmbedder  # type: ignore
+            except Exception:
+                # Backward compatibility with previous module name.
+                from mulan_embed import MuLanEmbedder  # type: ignore
         except Exception as err:
             raise SemanticServiceError(
                 f"Failed loading embedding runtime modules from repo root: {err}"

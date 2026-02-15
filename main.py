@@ -187,8 +187,8 @@ def _weighted_blend_scores(
     mulan_scores: Dict[str, float],
     elastic_scores: Dict[str, float],
     *,
-    mulan_weight: float = 0.5,
-    elastic_weight: float = 0.5,
+    mulan_weight: float = 0.7,
+    elastic_weight: float = 0.3,
 ) -> Dict[str, float]:
     total = mulan_weight + elastic_weight
     if total <= 0:
@@ -384,13 +384,56 @@ def _select_song_from_query(
         except Exception as err:
             print(f"[MUSIC] elastic retrieval warning: {err}", file=sys.stderr)
     blended = _weighted_blend_scores(
-        mulan_scores, elastic_scores, mulan_weight=0.5, elastic_weight=0.5
+        mulan_scores, elastic_scores, mulan_weight=0.8, elastic_weight=0.2
     )
     if not blended:
         return None, mulan_scores, elastic_scores, blended
     best_key = max(blended.items(), key=lambda x: x[1])[0]
     path_map = {song.key: song.path for song in songs}
     return path_map.get(best_key), mulan_scores, elastic_scores, blended
+
+
+def _list_local_song_paths(songs_dir: str) -> List[Path]:
+    directory = Path(songs_dir).resolve()
+    patterns = ("*.mp3", "*.wav", "*.m4a", "*.flac", "*.ogg")
+    files: List[Path] = []
+    for pattern in patterns:
+        files.extend(sorted(directory.glob(pattern)))
+    return files
+
+
+def _select_song_from_query_elastic_only(
+    *,
+    query_text: str,
+    song_paths: List[Path],
+    es_client: Optional[Elasticsearch],
+    es_index: str,
+    top_k: int = 3,
+) -> Tuple[Optional[Path], Dict[str, float], Dict[str, float], Dict[str, float]]:
+    print(
+        f"[RETRIEVAL] starting query calculation (Elasticsearch-only fallback): "
+        f"query='{query_text}' top_k={top_k} es_index='{es_index}'"
+    )
+    elastic_scores: Dict[str, float] = {}
+    if es_client is not None:
+        try:
+            elastic_scores = _elastic_topk_scores(
+                es_client, es_index=es_index, query_text=query_text, top_k=top_k
+            )
+        except Exception as err:
+            print(f"[MUSIC] elastic retrieval warning: {err}", file=sys.stderr)
+
+    if not song_paths:
+        return None, {}, elastic_scores, elastic_scores
+
+    path_map = {_normalize_key(path.stem): path for path in song_paths}
+    selected_path: Optional[Path] = None
+    if elastic_scores:
+        best_key = max(elastic_scores.items(), key=lambda x: x[1])[0]
+        selected_path = path_map.get(best_key)
+    if selected_path is None:
+        selected_path = sorted(song_paths)[0]
+    return selected_path, {}, elastic_scores, elastic_scores
 
 
 def _music_worker(
@@ -410,14 +453,27 @@ def _music_worker(
     retrieval_cache_dir: str,
     retrieval_no_cache: bool,
 ) -> None:
-    last_processed_emotion: Optional[str] = None
+    last_processed_signature: Optional[Tuple[str, bool]] = None
     client: Optional[OpenAI] = None
     retrieval_embedder: Optional[MuLanEmbedder] = None
     retrieval_songs: List[LocalSongEmbedding] = []
+    retrieval_song_paths: List[Path] = []
     retrieval_es_client: Optional[Elasticsearch] = None
+    retrieval_fallback_mode = False
+    retrieval_fallback_logged = False
+    retrieval_initialized = False
     if openai_api_key:
         client = OpenAI(api_key=openai_api_key)
-    if not generate:
+
+    def _initialize_retrieval() -> None:
+        nonlocal retrieval_embedder
+        nonlocal retrieval_songs
+        nonlocal retrieval_song_paths
+        nonlocal retrieval_es_client
+        nonlocal retrieval_fallback_mode
+        nonlocal retrieval_initialized
+        if retrieval_initialized:
+            return
         try:
             retrieval_embedder, retrieval_songs = _load_local_song_embeddings(
                 songs_dir=songs_dir,
@@ -431,23 +487,49 @@ def _music_worker(
                 f"[MUSIC] retrieval mode ready: songs={len(retrieval_songs)} "
                 f"es_index='{es_index}'"
             )
+            retrieval_initialized = True
         except (MuLanEmbedError, RuntimeError) as err:
             print(f"[MUSIC] retrieval setup error: {err}", file=sys.stderr)
+            retrieval_song_paths = _list_local_song_paths(songs_dir)
+            retrieval_es_client = _build_es_client(es_url)
+            if retrieval_song_paths:
+                retrieval_fallback_mode = True
+                print(
+                    f"[MUSIC] retrieval fallback enabled (elastic-only): "
+                    f"songs={len(retrieval_song_paths)} es_index='{es_index}'"
+                )
+            retrieval_initialized = True
         except Exception as err:
             print(f"[MUSIC] retrieval setup warning: {err}", file=sys.stderr)
+            retrieval_initialized = True
+
+    if not generate:
+        _initialize_retrieval()
 
     while True:
         item = emotion_queue.get()
         if item == "__STOP__":
             return
+        item_generate = generate
         if isinstance(item, tuple):
-            emotion, context = item
+            if len(item) >= 3:
+                emotion, context, item_generate = item[0], item[1], bool(item[2])
+            elif len(item) == 2:
+                emotion, context = item
+            else:
+                emotion, context = item[0], None
         else:
             emotion, context = item, None
-        if emotion == last_processed_emotion:
+        use_generate = bool(item_generate)
+        signature = (str(emotion), use_generate)
+        if signature == last_processed_signature:
             continue
         try:
-            if client is not None:
+            # If fusion/context text exists, pass it directly to Suno/retrieval.
+            # This avoids shortening/paraphrasing via an extra OpenAI prompt step.
+            if context and str(context).strip():
+                prompt = str(context).strip()
+            elif client is not None:
                 prompt = generate_suno_prompt_for_emotion(
                     emotion,
                     client=client,
@@ -455,12 +537,10 @@ def _music_worker(
                     max_tokens=openai_max_tokens,
                     context=context,
                 )
-                prompt_source = "openai"
             else:
                 prompt = f"{emotion} mood music"
-                prompt_source = "emotion-fallback"
 
-            if generate:
+            if use_generate:
                 result = generate_from_prompt(
                     prompt,
                     wait=True,
@@ -475,26 +555,45 @@ def _music_worker(
                     continue
                 if player is None:
                     print(
-                        f"[MUSIC] emotion={emotion} prompt_source={prompt_source} "
+                        f"[MUSIC] emotion={emotion} prompt='{prompt}' "
                         f"task_id={result.task_id} playable_url={url} (playback disabled)"
                     )
                 else:
                     played_file = player.play_url(url)
                     print(
-                        f"[MUSIC] emotion={emotion} prompt_source={prompt_source} "
+                        f"[MUSIC] emotion={emotion} prompt='{prompt}' "
                         f"task_id={result.task_id} playing={played_file}"
                     )
             else:
-                if retrieval_embedder is None or not retrieval_songs:
-                    raise RuntimeError("Retrieval mode not initialized; cannot select local songs.")
-                selected_path, mulan_scores, elastic_scores, blended_scores = _select_song_from_query(
-                    query_text=prompt,
-                    embedder=retrieval_embedder,
-                    songs=retrieval_songs,
-                    es_client=retrieval_es_client,
-                    es_index=es_index,
-                    top_k=max(1, retrieval_top_k),
-                )
+                if not retrieval_initialized:
+                    print("[MUSIC] initializing retrieval on first Spotify-mode event...")
+                    _initialize_retrieval()
+                if retrieval_embedder is not None and retrieval_songs:
+                    selected_path, mulan_scores, elastic_scores, blended_scores = _select_song_from_query(
+                        query_text=prompt,
+                        embedder=retrieval_embedder,
+                        songs=retrieval_songs,
+                        es_client=retrieval_es_client,
+                        es_index=es_index,
+                        top_k=max(1, retrieval_top_k),
+                    )
+                elif retrieval_song_paths:
+                    if retrieval_fallback_mode and not retrieval_fallback_logged:
+                        print("[MUSIC] using elastic-only retrieval fallback (MuLan unavailable).")
+                        retrieval_fallback_logged = True
+                    selected_path, mulan_scores, elastic_scores, blended_scores = (
+                        _select_song_from_query_elastic_only(
+                            query_text=prompt,
+                            song_paths=retrieval_song_paths,
+                            es_client=retrieval_es_client,
+                            es_index=es_index,
+                            top_k=max(1, retrieval_top_k),
+                        )
+                    )
+                else:
+                    raise RuntimeError(
+                        "Retrieval mode not initialized; cannot select local songs."
+                    )
                 print(f"[MUSIC] prompt='{prompt}'")
                 print(f"[MUSIC] mulan_top{retrieval_top_k}: {mulan_scores}")
                 print(f"[MUSIC] elastic_top{retrieval_top_k}: {elastic_scores}")
@@ -504,16 +603,16 @@ def _music_worker(
                     continue
                 if player is None:
                     print(
-                        f"[MUSIC] emotion={emotion} prompt_source={prompt_source} "
+                        f"[MUSIC] emotion={emotion} prompt='{prompt}' "
                         f"selected_song={selected_path} (playback disabled)"
                     )
                 else:
                     played_file = player.play_url(str(selected_path))
                     print(
-                        f"[MUSIC] emotion={emotion} prompt_source={prompt_source} "
+                        f"[MUSIC] emotion={emotion} prompt='{prompt}' "
                         f"selected_song={selected_path} playing={played_file}"
                     )
-            last_processed_emotion = emotion
+            last_processed_signature = signature
         except MusicPlaybackError as err:
             print(f"[MUSIC] playback error for emotion '{emotion}': {err}", file=sys.stderr)
         except SunoError as err:
@@ -673,7 +772,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--context-interval",
         type=float,
-        default=1800,
+        default=10800,
         help="Interval in seconds between room context captures (default: 1800 = 30 min).",
     )
     parser.add_argument(
