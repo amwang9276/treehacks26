@@ -47,11 +47,16 @@ class MuLanEmbedder:
         try:
             from muq import MuQMuLan  # type: ignore
 
-            self._mulan = MuQMuLan.from_pretrained(
+            model = MuQMuLan.from_pretrained(
                 self.model_id,
                 token=hf_token,
                 local_files_only=local_only,
-            ).to(self.device).eval()
+            )
+            # Some muq/torch combinations fail on CPU when calling `.to("cpu")`
+            # due to meta tensors during lazy init. Keep default placement for CPU.
+            if self.device and str(self.device).lower() not in {"cpu"}:
+                model = model.to(self.device)
+            self._mulan = model.eval()
             self._backend = "muq"
             return
         except ModuleNotFoundError as err:

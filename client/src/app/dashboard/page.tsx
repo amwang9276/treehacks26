@@ -7,7 +7,7 @@ function apiBase(): string {
   return process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
 }
 
-const LOG_COLUMNS = ["SYSTEM", "EMOTION", "CONTEXT", "FUSION", "VOICE", "RETRIEVAL", "MUSIC"];
+const LOG_COLUMNS = ["SYSTEM", "EMOTION", "CONTEXT", "VOICE", "FUSION", "RETRIEVAL", "MUSIC"];
 
 type RuntimeLogs = {
   running: boolean;
@@ -96,46 +96,41 @@ export default function DashboardPage() {
 
   return (
     <main className="container">
-      <div className="card">
-        <h1>Dashboard</h1>
-        <p className="muted">
-          Runtime status: {logs.running ? "running" : "stopped"} | mode:{" "}
-          {generate ? "suno" : "spotify retrieval"}
-        </p>
-        {error ? <p style={{ color: "#b42318" }}>Error: {error}</p> : null}
-        <img
-          src={`${apiBase()}/dashboard/runtime/stream?fps=15`}
-          alt="Runtime camera stream"
-          style={{
-            width: "80%",
-            maxWidth: 840,
-            borderRadius: 12,
-            border: "1px solid #e7eaf0",
-            background: "#000",
-            display: "block",
-            margin: "0 auto",
-          }}
-        />
-      </div>
-      <section className="log-grid">
-        {columns.map((column) => (
-          <div key={column.tag} className="card">
-            <h3>[{column.tag}]</h3>
-            <div className="log-list">
-              {column.entries.length === 0 ? (
-                <p className="muted">No output yet.</p>
-              ) : (
-                column.entries.map((line, idx) => (
-                  <p key={`${column.tag}-${idx}`} className="log-line">
-                    {line}
-                  </p>
-                ))
-              )}
-            </div>
+      <section className="dashboard-layout">
+        <div className="card camera-card">
+          <h1>Dashboard</h1>
+          <p className="muted">
+            Runtime status: {logs.running ? "running" : "stopped"} | mode:{" "}
+            {generate ? "suno" : "spotify retrieval"}
+          </p>
+          {error ? <p style={{ color: "#b42318" }}>Error: {error}</p> : null}
+          <div className="camera-frame-wrap">
+            <img
+              src={`${apiBase()}/dashboard/runtime/stream?fps=15`}
+              alt="Runtime camera stream"
+              className="camera-frame"
+            />
           </div>
-        ))}
+        </div>
+        <section className="log-grid">
+          {columns.map((column) => (
+            <div key={column.tag} className="card">
+              <h3>[{column.tag}]</h3>
+              <div className="log-list">
+                {column.entries.length === 0 ? (
+                  <p className="muted">No output yet.</p>
+                ) : (
+                  column.entries.map((line, idx) => (
+                    <p key={`${column.tag}-${idx}`} className="log-line">
+                      {line}
+                    </p>
+                  ))
+                )}
+              </div>
+            </div>
+          ))}
+        </section>
       </section>
     </main>
   );
 }
-

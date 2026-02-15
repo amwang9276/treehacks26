@@ -5,8 +5,8 @@
 body {
   margin: 0;
   font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
-  background: #f5f7fb;
-  color: #101828;
+  background: #0b0f14;
+  color: #e6edf3;
 }
 
 a {
@@ -15,14 +15,14 @@ a {
 }
 
 .container {
-  max-width: 960px;
+  max-width: 1400px;
   margin: 0 auto;
   padding: 24px;
 }
 
 .card {
-  background: #fff;
-  border: 1px solid #e7eaf0;
+  background: #111823;
+  border: 1px solid #1f2a37;
   border-radius: 12px;
   padding: 16px;
   margin-bottom: 12px;
@@ -33,27 +33,27 @@ a {
   border-radius: 8px;
   padding: 10px 14px;
   border: none;
-  background: #0f6fff;
-  color: #fff;
+  background: #2f81f7;
+  color: #f0f6fc;
   cursor: pointer;
 }
 
 .muted {
-  color: #667085;
+  color: #9aa6b2;
 }
 
 .progress-track {
   width: 100%;
   height: 10px;
   border-radius: 999px;
-  background: #e7eaf0;
+  background: #1f2a37;
   overflow: hidden;
   margin: 8px 0 12px;
 }
 
 .progress-fill {
   height: 100%;
-  background: #0f6fff;
+  background: #2f81f7;
   transition: width 300ms ease;
 }
 
@@ -67,6 +67,34 @@ a {
   display: grid;
   gap: 12px;
   grid-template-columns: 1fr;
+}
+
+.dashboard-layout {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 1fr;
+}
+
+.camera-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 72vh;
+}
+
+.camera-frame-wrap {
+  flex: 1;
+  min-height: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid #1f2a37;
+  background: #000;
+}
+
+.camera-frame {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
 }
 
 .log-list {
@@ -90,7 +118,18 @@ a {
     grid-template-columns: 1fr 1fr;
   }
 
+  .dashboard-layout {
+    grid-template-columns: minmax(520px, 1.2fr) minmax(380px, 1fr);
+    align-items: stretch;
+  }
+
+  .camera-card {
+    margin-bottom: 0;
+    min-height: calc(100vh - 48px);
+  }
+
   .log-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-content: start;
   }
 }

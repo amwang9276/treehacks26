@@ -447,7 +447,11 @@ def _music_worker(
         if emotion == last_processed_emotion:
             continue
         try:
-            if client is not None:
+            # If fusion/context text exists, pass it directly to Suno/retrieval.
+            # This avoids shortening/paraphrasing via an extra OpenAI prompt step.
+            if context and str(context).strip():
+                prompt = str(context).strip()
+            elif client is not None:
                 prompt = generate_suno_prompt_for_emotion(
                     emotion,
                     client=client,
@@ -455,10 +459,8 @@ def _music_worker(
                     max_tokens=openai_max_tokens,
                     context=context,
                 )
-                prompt_source = "openai"
             else:
                 prompt = f"{emotion} mood music"
-                prompt_source = "emotion-fallback"
 
             if generate:
                 result = generate_from_prompt(
@@ -475,13 +477,13 @@ def _music_worker(
                     continue
                 if player is None:
                     print(
-                        f"[MUSIC] emotion={emotion} prompt_source={prompt_source} "
+                        f"[MUSIC] emotion={emotion} prompt='{prompt}' "
                         f"task_id={result.task_id} playable_url={url} (playback disabled)"
                     )
                 else:
                     played_file = player.play_url(url)
                     print(
-                        f"[MUSIC] emotion={emotion} prompt_source={prompt_source} "
+                        f"[MUSIC] emotion={emotion} prompt='{prompt}' "
                         f"task_id={result.task_id} playing={played_file}"
                     )
             else:
@@ -504,13 +506,13 @@ def _music_worker(
                     continue
                 if player is None:
                     print(
-                        f"[MUSIC] emotion={emotion} prompt_source={prompt_source} "
+                        f"[MUSIC] emotion={emotion} prompt='{prompt}' "
                         f"selected_song={selected_path} (playback disabled)"
                     )
                 else:
                     played_file = player.play_url(str(selected_path))
                     print(
-                        f"[MUSIC] emotion={emotion} prompt_source={prompt_source} "
+                        f"[MUSIC] emotion={emotion} prompt='{prompt}' "
                         f"selected_song={selected_path} playing={played_file}"
                     )
             last_processed_emotion = emotion

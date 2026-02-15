@@ -47,7 +47,7 @@ class SensorFusion:
                 {
                     "role": "system",
                     "content": (
-                        "You receive sensor data about a room. Produce exactly five sentences"
+                        "You receive sensor data about a room. Produce exactly three sentences"
                         "describing the event or occasion, the mood of the collective, and the atmosphere"
                         "combining all available sensor inputs. No bullet points"
                         "keep the descriptions succinct, informative, and to the point. From this, give an RGB"

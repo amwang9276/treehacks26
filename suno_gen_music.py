@@ -232,19 +232,57 @@ def wait_for_generation(
             task_id, api_key=api_key, base_url=base_url, timeout_s=30.0
         )
         clips = details.get("clips") or []
-        clip = clips[0] if clips else {}
-        status = str(clip.get("status") or "unknown").lower()
-        has_audio = bool(clip.get("audio_url"))
-
-        if status in SUCCESS_STATUSES and has_audio:
+        # Prefer earliest playable streaming clip so playback can start ASAP.
+        playable_streaming = next(
+            (
+                c
+                for c in clips
+                if str((c or {}).get("status") or "").lower() == "streaming"
+                and bool((c or {}).get("audio_url"))
+            ),
+            None,
+        )
+        if playable_streaming is not None:
             return SunoGenerationResult(
                 task_id=task_id,
-                status=status,
+                status="streaming",
                 tracks=_parse_tracks(details),
                 raw=details.get("raw") or details,
             )
-        if status in FAILURE_STATUSES:
-            raise SunoError(f"Suno generation failed: status={status}, details={clip}")
+
+        playable_complete = next(
+            (
+                c
+                for c in clips
+                if str((c or {}).get("status") or "").lower() == "complete"
+                and bool((c or {}).get("audio_url"))
+            ),
+            None,
+        )
+        if playable_complete is not None:
+            return SunoGenerationResult(
+                task_id=task_id,
+                status="complete",
+                tracks=_parse_tracks(details),
+                raw=details.get("raw") or details,
+            )
+
+        # If any clip hard-fails before audio is available, surface that early.
+        failed_clip = next(
+            (
+                c
+                for c in clips
+                if str((c or {}).get("status") or "").lower() in FAILURE_STATUSES
+            ),
+            None,
+        )
+        if failed_clip is not None:
+            failed_status = str(failed_clip.get("status") or "error").lower()
+            raise SunoError(
+                f"Suno generation failed: status={failed_status}, details={failed_clip}"
+            )
+
+        status = str((clips[0] if clips else {}).get("status") or "unknown").lower()
         if time.time() - start >= timeout_s:
             raise SunoTimeoutError(
                 f"Timed out waiting for task {task_id} after {timeout_s:.1f}s "

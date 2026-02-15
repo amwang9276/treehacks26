@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import re
 import sys
+import os
 import threading
 import time
 from collections import deque
@@ -223,22 +224,65 @@ class DashboardRuntime:
             emotion_queue: "queue.Queue[_MusicQueueItem]" = queue.Queue()
 
             # Env/settings shared with main defaults.
-            env = _read_env_file()
-            openai_api_key = env.get("OPENAI_API_KEY")
-            es_url = env.get("ELASTICSEARCH_URL", "http://localhost:9200")
-            es_index = env.get("ELASTICSEARCH_INDEX", "lyrics")
-            mulan_model_id = env.get("MULAN_MODEL_ID", "OpenMuQ/MuQ-MuLan-large")
-            ffplay_path = env.get("FFPLAY_PATH")
+            # Read repo-root .env explicitly because server cwd is often `server/`.
+            repo_env = _read_env_file(self._repo_root() / ".env")
+            cwd_env = _read_env_file()
+            openai_api_key = (
+                os.environ.get("OPENAI_API_KEY")
+                or repo_env.get("OPENAI_API_KEY")
+                or cwd_env.get("OPENAI_API_KEY")
+            )
+            es_url = (
+                os.environ.get("ELASTICSEARCH_URL")
+                or repo_env.get("ELASTICSEARCH_URL")
+                or cwd_env.get("ELASTICSEARCH_URL")
+                or "http://localhost:9200"
+            )
+            es_index = (
+                os.environ.get("ELASTICSEARCH_INDEX")
+                or repo_env.get("ELASTICSEARCH_INDEX")
+                or cwd_env.get("ELASTICSEARCH_INDEX")
+                or "lyrics"
+            )
+            mulan_model_id = (
+                os.environ.get("MULAN_MODEL_ID")
+                or repo_env.get("MULAN_MODEL_ID")
+                or cwd_env.get("MULAN_MODEL_ID")
+                or "OpenMuQ/MuQ-MuLan-large"
+            )
+            ffplay_path = (
+                os.environ.get("FFPLAY_PATH")
+                or repo_env.get("FFPLAY_PATH")
+                or cwd_env.get("FFPLAY_PATH")
+            )
+            songs_dir_path = self._repo_root() / "songs"
+            retrieval_cache_dir_path = (
+                self._repo_root() / ".cache" / "mulan_song_embeddings_main"
+            )
 
             self._log("SYSTEM", "Dashboard runtime started")
+            self._log("RETRIEVAL", f"songs_dir='{songs_dir_path}'")
 
             openai_client = OpenAI(api_key=openai_api_key) if openai_api_key else None
             context_shot = (
-                ContextShot(client=openai_client, interval_s=1800)
+                ContextShot(client=openai_client, interval_s=600)
                 if openai_client
                 else None
             )
             fusion = SensorFusion(client=openai_client) if openai_client else None
+            if openai_client is None:
+                self._log("CONTEXT", "disabled: missing OPENAI_API_KEY")
+                self._log("FUSION", "disabled: missing OPENAI_API_KEY")
+            else:
+                self._log(
+                    "CONTEXT",
+                    "enabled: capturing scene every 10 minutes (and once at startup)",
+                )
+                self._log(
+                    "FUSION",
+                    "enabled: running once at startup, then on stable emotion changes",
+                )
+                self._log("FUSION", "waiting for first emotion observation")
 
             latest_voice_observation = None
             voice_lock = threading.Lock()
@@ -258,15 +302,54 @@ class DashboardRuntime:
 
             detector = StableEmotionChangeDetector(min_stable_seconds=1.0)
             last_enqueued_emotion: Optional[str] = None
+            bootstrap_fusion_done = False
 
             def on_observation(observation):
-                nonlocal last_enqueued_emotion
+                nonlocal last_enqueued_emotion, bootstrap_fusion_done
                 triggered = detector.observe(observation)
+
+                fusion_context = None
+                if fusion is not None:
+                    with voice_lock:
+                        voice_obs = latest_voice_observation
+                    voice_kwargs = {}
+                    if voice_obs is not None and voice_obs.is_speech:
+                        voice_kwargs = dict(
+                            prosody_emotion=voice_obs.prosody_emotion,
+                            vocal_mood=voice_obs.vocal_mood,
+                            vocal_mood_score=voice_obs.vocal_mood_score,
+                            speech_rate=voice_obs.speech_rate,
+                            transcript=voice_obs.transcript,
+                            text_emotion=voice_obs.text_emotion,
+                            text_emotion_score=voice_obs.text_emotion_score,
+                            topics=voice_obs.topics,
+                            keywords=voice_obs.keywords,
+                        )
+
+                    effective_emotion = triggered or observation.label
+                    state = SensorState(
+                        emotion=effective_emotion,
+                        emotion_score=observation.score,
+                        face_count=observation.face_count,
+                        room_description=(
+                            context_shot.last_description if context_shot else None
+                        ),
+                        timestamp=observation.timestamp_s,
+                        **voice_kwargs,
+                    )
+                    if not bootstrap_fusion_done:
+                        try:
+                            fusion_context = fusion.generate_description(state)
+                            self._log("FUSION", f"startup: {fusion_context}")
+                        except Exception as err:
+                            self._log("FUSION", f"startup error: {err}")
+                        finally:
+                            bootstrap_fusion_done = True
+
                 if not triggered or triggered == last_enqueued_emotion:
                     return
                 self._log("EMOTION", f"stable change detected: {triggered}")
 
-                fusion_context = None
                 if fusion is not None:
                     with voice_lock:
                         voice_obs = latest_voice_observation
@@ -337,12 +420,12 @@ class DashboardRuntime:
                         "openai_max_tokens": DEFAULT_OPENAI_MAX_TOKENS,
                         "suno_poll_interval_s": 2.5,
                         "player": player,
-                        "songs_dir": "songs",
+                        "songs_dir": str(songs_dir_path),
                         "es_url": es_url,
                         "es_index": es_index,
                         "retrieval_top_k": 3,
                         "retrieval_model_id": mulan_model_id,
-                        "retrieval_cache_dir": ".cache/mulan_song_embeddings_main",
+                        "retrieval_cache_dir": str(retrieval_cache_dir_path),
                         "retrieval_no_cache": False,
                     },
                     daemon=True,
