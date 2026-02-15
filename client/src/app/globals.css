@@ -41,3 +41,18 @@ a {
 .muted {
   color: #667085;
 }
+
+.progress-track {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: #e7eaf0;
+  overflow: hidden;
+  margin: 8px 0 12px;
+}
+
+.progress-fill {
+  height: 100%;
+  background: #0f6fff;
+  transition: width 300ms ease;
+}

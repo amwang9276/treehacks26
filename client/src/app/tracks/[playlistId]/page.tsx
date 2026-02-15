@@ -38,6 +38,9 @@ export default function TracksPage() {
     };
   }, [playlistId]);
 
+  const noPreviewCount = tracks.filter((t) => !t.preview_url).length;
+  const withPreviewCount = tracks.length - noPreviewCount;
+
   return (
     <main className="container">
       <div className="card">
@@ -54,6 +57,13 @@ export default function TracksPage() {
       {!loading && !error && tracks.length === 0 && (
         <div className="card">
           <p className="muted">No tracks found in this playlist.</p>
+        </div>
+      )}
+      {!loading && !error && tracks.length > 0 && (
+        <div className="card">
+          <p className="muted">
+            Loaded tracks with preview: {withPreviewCount} | Loaded tracks with no preview: {noPreviewCount}
+          </p>
         </div>
       )}
       {!loading &&
