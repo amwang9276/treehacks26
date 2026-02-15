@@ -187,8 +187,8 @@ def _weighted_blend_scores(
     mulan_scores: Dict[str, float],
     elastic_scores: Dict[str, float],
     *,
-    mulan_weight: float = 0.5,
-    elastic_weight: float = 0.5,
+    mulan_weight: float = 0.7,
+    elastic_weight: float = 0.3,
 ) -> Dict[str, float]:
     total = mulan_weight + elastic_weight
     if total <= 0:
@@ -393,6 +393,49 @@ def _select_song_from_query(
     return path_map.get(best_key), mulan_scores, elastic_scores, blended
 
 
+def _list_local_song_paths(songs_dir: str) -> List[Path]:
+    directory = Path(songs_dir).resolve()
+    patterns = ("*.mp3", "*.wav", "*.m4a", "*.flac", "*.ogg")
+    files: List[Path] = []
+    for pattern in patterns:
+        files.extend(sorted(directory.glob(pattern)))
+    return files
+
+
+def _select_song_from_query_elastic_only(
+    *,
+    query_text: str,
+    song_paths: List[Path],
+    es_client: Optional[Elasticsearch],
+    es_index: str,
+    top_k: int = 3,
+) -> Tuple[Optional[Path], Dict[str, float], Dict[str, float], Dict[str, float]]:
+    print(
+        f"[RETRIEVAL] starting query calculation (Elasticsearch-only fallback): "
+        f"query='{query_text}' top_k={top_k} es_index='{es_index}'"
+    )
+    elastic_scores: Dict[str, float] = {}
+    if es_client is not None:
+        try:
+            elastic_scores = _elastic_topk_scores(
+                es_client, es_index=es_index, query_text=query_text, top_k=top_k
+            )
+        except Exception as err:
+            print(f"[MUSIC] elastic retrieval warning: {err}", file=sys.stderr)
+
+    if not song_paths:
+        return None, {}, elastic_scores, elastic_scores
+
+    path_map = {_normalize_key(path.stem): path for path in song_paths}
+    selected_path: Optional[Path] = None
+    if elastic_scores:
+        best_key = max(elastic_scores.items(), key=lambda x: x[1])[0]
+        selected_path = path_map.get(best_key)
+    if selected_path is None:
+        selected_path = sorted(song_paths)[0]
+    return selected_path, {}, elastic_scores, elastic_scores
+
+
 def _music_worker(
     emotion_queue: "queue.Queue[_MusicQueueItem]",
     *,
@@ -414,7 +457,10 @@ def _music_worker(
     client: Optional[OpenAI] = None
     retrieval_embedder: Optional[MuLanEmbedder] = None
     retrieval_songs: List[LocalSongEmbedding] = []
+    retrieval_song_paths: List[Path] = []
     retrieval_es_client: Optional[Elasticsearch] = None
+    retrieval_fallback_mode = False
+    retrieval_fallback_logged = False
     if openai_api_key:
         client = OpenAI(api_key=openai_api_key)
     if not generate:
@@ -433,6 +479,14 @@ def _music_worker(
             )
         except (MuLanEmbedError, RuntimeError) as err:
             print(f"[MUSIC] retrieval setup error: {err}", file=sys.stderr)
+            retrieval_song_paths = _list_local_song_paths(songs_dir)
+            retrieval_es_client = _build_es_client(es_url)
+            if retrieval_song_paths:
+                retrieval_fallback_mode = True
+                print(
+                    f"[MUSIC] retrieval fallback enabled (elastic-only): "
+                    f"songs={len(retrieval_song_paths)} es_index='{es_index}'"
+                )
         except Exception as err:
             print(f"[MUSIC] retrieval setup warning: {err}", file=sys.stderr)
 
@@ -487,16 +541,32 @@ def _music_worker(
                         f"task_id={result.task_id} playing={played_file}"
                     )
             else:
-                if retrieval_embedder is None or not retrieval_songs:
-                    raise RuntimeError("Retrieval mode not initialized; cannot select local songs.")
-                selected_path, mulan_scores, elastic_scores, blended_scores = _select_song_from_query(
-                    query_text=prompt,
-                    embedder=retrieval_embedder,
-                    songs=retrieval_songs,
-                    es_client=retrieval_es_client,
-                    es_index=es_index,
-                    top_k=max(1, retrieval_top_k),
-                )
+                if retrieval_embedder is not None and retrieval_songs:
+                    selected_path, mulan_scores, elastic_scores, blended_scores = _select_song_from_query(
+                        query_text=prompt,
+                        embedder=retrieval_embedder,
+                        songs=retrieval_songs,
+                        es_client=retrieval_es_client,
+                        es_index=es_index,
+                        top_k=max(1, retrieval_top_k),
+                    )
+                elif retrieval_song_paths:
+                    if retrieval_fallback_mode and not retrieval_fallback_logged:
+                        print("[MUSIC] using elastic-only retrieval fallback (MuLan unavailable).")
+                        retrieval_fallback_logged = True
+                    selected_path, mulan_scores, elastic_scores, blended_scores = (
+                        _select_song_from_query_elastic_only(
+                            query_text=prompt,
+                            song_paths=retrieval_song_paths,
+                            es_client=retrieval_es_client,
+                            es_index=es_index,
+                            top_k=max(1, retrieval_top_k),
+                        )
+                    )
+                else:
+                    raise RuntimeError(
+                        "Retrieval mode not initialized; cannot select local songs."
+                    )
                 print(f"[MUSIC] prompt='{prompt}'")
                 print(f"[MUSIC] mulan_top{retrieval_top_k}: {mulan_scores}")
                 print(f"[MUSIC] elastic_top{retrieval_top_k}: {elastic_scores}")
