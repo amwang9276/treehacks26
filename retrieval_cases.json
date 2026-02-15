@@ -1,8 +1,8 @@
 [
-  {"query": "happy upbeat dance pop", "expected": "happy_pharraell.mp3"},
-  {"query": "party groovy music", "expected": "party_rock_anthem_lmfao.mp3"},
-  {"query": "sad emotional ballad", "expected": "dancing_with_your_ghost_sasha.mp3"},
-  {"query": "calm focus no-lyrics study lofi", "expected": "ladyfingers_herb.mp3"},
-  {"query": "romantic serenade music", "expected": "perfect_ed.mp3"},
-  {"query": "angry loud music", "expected": "go_to_war_nothing.mp3"}
+  {"query": "happy upbeat dance pop", "expected": "happy_pharraell"},
+  {"query": "party groovy music", "expected": "party_rock_anthem_lmfao"},
+  {"query": "sad emotional ballad", "expected": "dancing_with_your_ghost_sasha"},
+  {"query": "calm focus no-lyrics study lofi", "expected": "ladyfingers_herb"},
+  {"query": "romantic serenade music", "expected": "perfect_ed"},
+  {"query": "angry loud music", "expected": "go_to_war_nothing"}
 ]

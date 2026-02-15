@@ -3,14 +3,37 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Tuple
 
 import numpy as np
+from elasticsearch import Elasticsearch
 
 from mulan import DEFAULT_MULAN_MODEL_ID, MuLanEmbedError, MuLanEmbedder
+
+
+def _resolve_env(name: str, default: str) -> str:
+    value = (os.environ.get(name) or "").strip()
+    if value:
+        return value
+    env_path = Path(".env")
+    if env_path.exists():
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, raw_val = line.split("=", 1)
+            if key.strip() == name:
+                return raw_val.strip().strip("\"' ")
+    return default
+
+
+def _resolve_bool_env(name: str, default: bool) -> bool:
+    raw = _resolve_env(name, str(default).lower()).strip().lower()
+    return raw in {"1", "true", "yes"}
 
 
 @dataclass
@@ -64,6 +87,132 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     if denom <= 0:
         return 0.0
     return float(np.dot(a, b) / denom)
+
+
+def _normalize_key(text: str) -> str:
+    return "".join(ch.lower() if ch.isalnum() else "_" for ch in text).strip("_")
+
+
+def _score_to_unit_interval(cosine_score: float) -> float:
+    return max(0.0, min(1.0, (cosine_score + 1.0) / 2.0))
+
+
+def _build_song_lookup(song_vectors: List[SongVector]) -> Dict[str, Path]:
+    lookup: Dict[str, Path] = {}
+    for song in song_vectors:
+        key = _normalize_key(song.path.stem)
+        lookup[key] = song.path
+    return lookup
+
+
+def _mulan_topk_dict(
+    qvec: np.ndarray, song_vectors: List[SongVector], top_k: int
+) -> Tuple[List[Tuple[float, Path]], Dict[str, float]]:
+    ranked = sorted(
+        ((_cosine(qvec, song.vector), song.path) for song in song_vectors),
+        key=lambda x: x[0],
+        reverse=True,
+    )
+    mulan_scores: Dict[str, float] = {}
+    for cosine_score, path in ranked[:top_k]:
+        mulan_scores[_normalize_key(path.stem)] = _score_to_unit_interval(cosine_score)
+    return ranked, mulan_scores
+
+
+def _build_es_client(es_url: str) -> Elasticsearch:
+    api_key = _resolve_env("ELASTICSEARCH_API_KEY", "")
+    username = _resolve_env("ELASTICSEARCH_USERNAME", "")
+    password = _resolve_env("ELASTICSEARCH_PASSWORD", "")
+    verify_certs = _resolve_bool_env("ELASTICSEARCH_VERIFY_CERTS", True)
+    kwargs: Dict[str, object] = {"verify_certs": verify_certs}
+    if api_key:
+        kwargs["api_key"] = api_key
+    elif username and password:
+        kwargs["basic_auth"] = (username, password)
+    return Elasticsearch(es_url, **kwargs)
+
+
+def _print_index_snapshot(es_url: str, es_index: str, limit: int = 5) -> None:
+    client = _build_es_client(es_url)
+    exists = client.indices.exists(index=es_index)
+    print(f"[ES] index='{es_index}' exists={exists}")
+    if not exists:
+        return
+    count = int(client.count(index=es_index).get("count") or 0)
+    print(f"[ES] doc_count={count}")
+    if count <= 0:
+        return
+    resp = client.search(
+        index=es_index,
+        body={
+            "query": {"match_all": {}},
+            "_source": ["song_key", "song_title", "lyric_id"],
+            "size": max(1, limit),
+        },
+    )
+    for i, hit in enumerate((resp.get("hits") or {}).get("hits", []), start=1):
+        src = hit.get("_source") or {}
+        print(
+            f"[ES] sample_{i}: id={hit.get('_id')} "
+            f"song_key={src.get('song_key')} song_title={src.get('song_title')}"
+        )
+
+
+def _elastic_topk_dict(
+    *,
+    es_url: str,
+    es_index: str,
+    query_text: str,
+    top_k: int,
+) -> Dict[str, float]:
+    client = _build_es_client(es_url)
+    if not client.indices.exists(index=es_index):
+        raise RuntimeError(f"Index '{es_index}' not found.")
+    resp = client.search(
+        index=es_index,
+        body={
+            "query": {
+                "multi_match": {
+                    "query": query_text,
+                    "fields": ["lyrics", "song_title^2"],
+                }
+            },
+            "_source": ["song_key", "song_title"],
+            "size": max(1, top_k),
+        },
+    )
+    hits = (resp.get("hits") or {}).get("hits", [])
+    if not hits:
+        return {}
+    max_score = float(hits[0].get("_score") or 1.0)
+    if max_score <= 0:
+        max_score = 1.0
+    es_scores: Dict[str, float] = {}
+    for hit in hits[:top_k]:
+        src = hit.get("_source") or {}
+        raw_key = str(src.get("song_key") or src.get("song_title") or hit.get("_id") or "")
+        key = _normalize_key(raw_key)
+        normalized = float(hit.get("_score") or 0.0) / max_score
+        es_scores[key] = max(0.0, min(1.0, normalized))
+    return es_scores
+
+
+def weighted_blend_scores(
+    mulan_scores: Dict[str, float],
+    elastic_scores: Dict[str, float],
+    *,
+    mulan_weight: float = 0.5,
+    elastic_weight: float = 0.5,
+) -> Dict[str, float]:
+    total = mulan_weight + elastic_weight
+    if total <= 0:
+        raise ValueError("Weights must sum to a positive value.")
+    mw = mulan_weight / total
+    ew = elastic_weight / total
+    blended: Dict[str, float] = {}
+    for key in set(mulan_scores) | set(elastic_scores):
+        blended[key] = mw * mulan_scores.get(key, 0.0) + ew * elastic_scores.get(key, 0.0)
+    return blended
 
 
 def _cache_key_for_song(path: Path, model_id: str, sample_rate: int) -> str:
@@ -124,6 +273,10 @@ def _is_match(song_path: Path, expected: str) -> bool:
     return expected.lower() in song_path.stem.lower()
 
 
+def _is_key_match(song_key: str, expected: str) -> bool:
+    return _normalize_key(expected) in song_key
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Evaluate MuLan text->audio retrieval on local songs."
@@ -137,6 +290,21 @@ def main() -> int:
     parser.add_argument("--model-id", default=DEFAULT_MULAN_MODEL_ID)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--top-k", type=int, default=3)
+    parser.add_argument(
+        "--es-url",
+        default=_resolve_env("ELASTICSEARCH_URL", "http://localhost:9200"),
+        help="Elasticsearch URL for semantic score blending.",
+    )
+    parser.add_argument(
+        "--es-index",
+        default=_resolve_env("ELASTICSEARCH_INDEX", "lyrics"),
+        help="Elasticsearch index name for semantic score blending.",
+    )
+    parser.add_argument(
+        "--disable-elastic",
+        action="store_true",
+        help="Disable Elasticsearch blending and use MuLan-only ranking.",
+    )
     parser.add_argument(
         "--cache-dir",
         default=".cache/mulan_song_embeddings",
@@ -196,31 +364,60 @@ def main() -> int:
     print(f"Embedded now: {embedded_now}")
     if not args.no_cache:
         print(f"Cache dir: {cache_dir}")
+    if not args.disable_elastic:
+        try:
+            _print_index_snapshot(args.es_url, args.es_index, limit=5)
+        except Exception as err:
+            print(f"[WARN] Failed to print index snapshot: {err}", file=sys.stderr)
     print("")
 
+    song_lookup = _build_song_lookup(song_vectors)
     for i, case in enumerate(cases, start=1):
         qvec = embedder.embed_text(case.query)
-        ranked = sorted(
-            (
-                (_cosine(qvec, song.vector), song.path)
-                for song in song_vectors
-            ),
-            key=lambda x: x[0],
-            reverse=True,
+        ranked, mulan_scores = _mulan_topk_dict(qvec, song_vectors, top_k=top_k)
+
+        elastic_scores: Dict[str, float] = {}
+        if not args.disable_elastic:
+            try:
+                elastic_scores = _elastic_topk_dict(
+                    es_url=args.es_url,
+                    es_index=args.es_index,
+                    query_text=case.query,
+                    top_k=top_k,
+                )
+            except Exception as err:
+                print(
+                    f"[WARN] Elasticsearch blend skipped for query '{case.query}': {err}",
+                    file=sys.stderr,
+                )
+
+        blended_scores = weighted_blend_scores(
+            mulan_scores,
+            elastic_scores,
+            mulan_weight=0.5,
+            elastic_weight=0.5,
         )
-        top1 = ranked[0][1]
-        topk_paths = [p for _, p in ranked[:top_k]]
-        top1_ok = _is_match(top1, case.expected)
-        topk_ok = any(_is_match(path, case.expected) for path in topk_paths)
+        blended_top = sorted(blended_scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+        top1_key = blended_top[0][0] if blended_top else ""
+        top1_path = song_lookup.get(top1_key)
+        top1_display = top1_path.name if top1_path else top1_key
+
+        top1_ok = _is_key_match(top1_key, case.expected)
+        topk_ok = any(_is_key_match(song_key, case.expected) for song_key, _ in blended_top)
         hits_at_1 += 1 if top1_ok else 0
         hits_at_k += 1 if topk_ok else 0
 
         print(
             f"[{i:02d}] query='{case.query}' expected~'{case.expected}' "
-            f"top1='{top1.name}' top1_ok={top1_ok} top{top_k}_ok={topk_ok}"
+            f"top1='{top1_display}' top1_ok={top1_ok} top{top_k}_ok={topk_ok}"
         )
-        for rank, (score, path) in enumerate(ranked[:top_k], start=1):
-            print(f"     {rank}. score={score:.4f} file={path.name}")
+        print(f"     mulan_top{top_k}: {mulan_scores}")
+        print(f"     elastic_top{top_k}: {elastic_scores}")
+        print(f"     blended_top{top_k}: {dict(blended_top)}")
+        for rank, (song_key, score) in enumerate(blended_top, start=1):
+            song_path = song_lookup.get(song_key)
+            display = song_path.name if song_path else song_key
+            print(f"     {rank}. blended_score={score:.4f} file={display}")
 
     total = len(cases)
     recall1 = hits_at_1 / total

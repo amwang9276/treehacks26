@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 import re
 from dataclasses import dataclass
@@ -31,10 +32,31 @@ class SearchHit:
 
 
 _LYRICS_CACHE: Optional[Dict[str, str]] = None
+_DOTENV_LOADED = False
 
 
 def _slugify(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")
+
+
+def _load_dotenv_once() -> None:
+    global _DOTENV_LOADED
+    if _DOTENV_LOADED:
+        return
+    env_path = Path(".env")
+    if not env_path.exists():
+        _DOTENV_LOADED = True
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("\"' ")
+        if key and key not in os.environ:
+            os.environ[key] = value
+    _DOTENV_LOADED = True
 
 
 def _lyrics_dir() -> Path:
@@ -83,6 +105,7 @@ def _lookup_lyrics(track: SpotifyTrack) -> Optional[str]:
 
 
 def _build_client(es_url: str) -> Elasticsearch:
+    _load_dotenv_once()
     user = os.environ.get("ELASTICSEARCH_USERNAME")
     password = os.environ.get("ELASTICSEARCH_PASSWORD")
     api_key = os.environ.get("ELASTICSEARCH_API_KEY")
@@ -237,3 +260,103 @@ def search_by_text_embedding(
             )
         )
     return hits
+
+
+def _ensure_lyrics_index(client: Elasticsearch, index_name: str) -> None:
+    if client.indices.exists(index=index_name):
+        return
+    mappings = {
+        "mappings": {
+            "properties": {
+                "lyric_id": {"type": "keyword"},
+                "song_key": {"type": "keyword"},
+                "song_title": {"type": "text"},
+                "lyrics": {"type": "text"},
+                "source_path": {"type": "keyword"},
+                "created_at": {"type": "date"},
+                "updated_at": {"type": "date"},
+            }
+        }
+    }
+    client.indices.create(index=index_name, body=mappings)
+
+
+def upload_lyrics_folder_to_index(
+    es_url: str,
+    *,
+    index_name: str = "lyrics",
+    lyrics_dir: Optional[str] = None,
+) -> int:
+    client = _build_client(es_url)
+    if not client.ping():
+        raise ESIndexError(f"Elasticsearch ping failed for {es_url}")
+
+    _ensure_lyrics_index(client, index_name)
+
+    ldir = Path(lyrics_dir).resolve() if lyrics_dir else _lyrics_dir()
+    if not ldir.exists():
+        raise ESIndexError(f"Lyrics directory does not exist: {ldir}")
+
+    txt_files = sorted(ldir.glob("*.txt"))
+    uploaded = 0
+    now = datetime.now(timezone.utc).isoformat()
+    for txt_path in txt_files:
+        key = _slugify(txt_path.stem)
+        if not key:
+            continue
+        try:
+            lyrics_text = txt_path.read_text(encoding="utf-8").strip()
+        except UnicodeDecodeError:
+            lyrics_text = txt_path.read_text(encoding="latin-1", errors="ignore").strip()
+        if not lyrics_text:
+            continue
+
+        doc = {
+            "lyric_id": key,
+            "song_key": key,
+            "song_title": txt_path.stem.replace("_", " "),
+            "lyrics": lyrics_text,
+            "source_path": str(txt_path.resolve()),
+            "updated_at": now,
+        }
+        existing = client.exists(index=index_name, id=key)
+        if not existing:
+            doc["created_at"] = now
+        client.index(index=index_name, id=key, document=doc)
+        uploaded += 1
+    return uploaded
+
+
+if __name__ == "__main__":
+    _load_dotenv_once()
+    parser = argparse.ArgumentParser(
+        description="Create lyrics index (if needed) and upload lyrics/*.txt to Elasticsearch."
+    )
+    parser.add_argument(
+        "--es-url",
+        default=os.environ.get("ELASTICSEARCH_URL", "http://localhost:9200"),
+        help="Elasticsearch URL (defaults to ELASTICSEARCH_URL env var).",
+    )
+    parser.add_argument(
+        "--index-name",
+        default="lyrics",
+        help="Index name for lyrics documents (default: lyrics).",
+    )
+    parser.add_argument(
+        "--lyrics-dir",
+        default=os.environ.get("LYRICS_DIR", "lyrics"),
+        help="Directory containing .txt lyric files.",
+    )
+    args = parser.parse_args()
+    try:
+        count = upload_lyrics_folder_to_index(
+            args.es_url,
+            index_name=args.index_name,
+            lyrics_dir=args.lyrics_dir,
+        )
+        print(
+            f"[LYRICS] Uploaded/updated {count} lyric documents "
+            f"to index '{args.index_name}'."
+        )
+    except ESIndexError as err:
+        raise SystemExit(f"[ERROR] {err}")
