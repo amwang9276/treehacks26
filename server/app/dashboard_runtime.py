@@ -70,6 +70,7 @@ class DashboardRuntime:
         self._latest_jpeg: Optional[bytes] = None
         self._logs: Dict[str, Deque[str]] = {}
         self._max_logs_per_tag = 120
+        self._generate_mode = True
 
     def _repo_root(self) -> Path:
         # server/app/dashboard_runtime.py -> server/app -> server -> repo root
@@ -132,6 +133,7 @@ class DashboardRuntime:
             if self._running:
                 return {"running": True, "message": "already running"}
             self._running = True
+            self._generate_mode = bool(generate)
             self._logs.clear()
             self._latest_jpeg = None
             self._stop_event.clear()
@@ -152,6 +154,18 @@ class DashboardRuntime:
         with self._lock:
             self._running = False
         return {"running": False, "message": "stopped"}
+
+    def set_generate_mode(self, generate: bool) -> Dict[str, object]:
+        with self._lock:
+            self._generate_mode = bool(generate)
+            running = self._running
+        mode_label = "suno" if generate else "spotify retrieval"
+        self._log("MUSIC", f"mode switched: {mode_label}")
+        return {"running": running, "generate": bool(generate), "mode": mode_label}
+
+    def get_generate_mode(self) -> bool:
+        with self._lock:
+            return bool(self._generate_mode)
 
     def is_running(self) -> bool:
         with self._lock:
@@ -415,7 +429,7 @@ class DashboardRuntime:
                             break
                     except queue.Empty:
                         break
-                emotion_queue.put((triggered, fusion_context))
+                emotion_queue.put((triggered, fusion_context, self.get_generate_mode()))
                 last_enqueued_emotion = triggered
 
             try:

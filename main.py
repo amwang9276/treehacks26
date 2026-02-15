@@ -384,7 +384,7 @@ def _select_song_from_query(
         except Exception as err:
             print(f"[MUSIC] elastic retrieval warning: {err}", file=sys.stderr)
     blended = _weighted_blend_scores(
-        mulan_scores, elastic_scores, mulan_weight=0.5, elastic_weight=0.5
+        mulan_scores, elastic_scores, mulan_weight=0.8, elastic_weight=0.2
     )
     if not blended:
         return None, mulan_scores, elastic_scores, blended
@@ -453,7 +453,7 @@ def _music_worker(
     retrieval_cache_dir: str,
     retrieval_no_cache: bool,
 ) -> None:
-    last_processed_emotion: Optional[str] = None
+    last_processed_signature: Optional[Tuple[str, bool]] = None
     client: Optional[OpenAI] = None
     retrieval_embedder: Optional[MuLanEmbedder] = None
     retrieval_songs: List[LocalSongEmbedding] = []
@@ -494,11 +494,19 @@ def _music_worker(
         item = emotion_queue.get()
         if item == "__STOP__":
             return
+        item_generate = generate
         if isinstance(item, tuple):
-            emotion, context = item
+            if len(item) >= 3:
+                emotion, context, item_generate = item[0], item[1], bool(item[2])
+            elif len(item) == 2:
+                emotion, context = item
+            else:
+                emotion, context = item[0], None
         else:
             emotion, context = item, None
-        if emotion == last_processed_emotion:
+        use_generate = bool(item_generate)
+        signature = (str(emotion), use_generate)
+        if signature == last_processed_signature:
             continue
         try:
             # If fusion/context text exists, pass it directly to Suno/retrieval.
@@ -516,7 +524,7 @@ def _music_worker(
             else:
                 prompt = f"{emotion} mood music"
 
-            if generate:
+            if use_generate:
                 result = generate_from_prompt(
                     prompt,
                     wait=True,
@@ -585,7 +593,7 @@ def _music_worker(
                         f"[MUSIC] emotion={emotion} prompt='{prompt}' "
                         f"selected_song={selected_path} playing={played_file}"
                     )
-            last_processed_emotion = emotion
+            last_processed_signature = signature
         except MusicPlaybackError as err:
             print(f"[MUSIC] playback error for emotion '{emotion}': {err}", file=sys.stderr)
         except SunoError as err:

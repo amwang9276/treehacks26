@@ -14,6 +14,10 @@ class StartRuntimeRequest(BaseModel):
     generate: bool = True
 
 
+class ModeRequest(BaseModel):
+    generate: bool
+
+
 def _runtime(request: Request):
     return request.app.state.dashboard_runtime
 
@@ -28,6 +32,12 @@ def start_runtime(payload: StartRuntimeRequest, request: Request) -> Dict[str, A
 def stop_runtime(request: Request) -> Dict[str, Any]:
     runtime = _runtime(request)
     return runtime.stop()
+
+
+@router.post("/mode")
+def set_runtime_mode(payload: ModeRequest, request: Request) -> Dict[str, Any]:
+    runtime = _runtime(request)
+    return runtime.set_generate_mode(payload.generate)
 
 
 @router.get("/logs")
@@ -46,4 +56,3 @@ def runtime_stream(
         runtime.mjpeg_stream(fps=fps),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
-

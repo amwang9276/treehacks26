@@ -63,6 +63,28 @@ export default function DashboardPage() {
         // noop
       });
     };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const applyMode = async () => {
+      try {
+        await fetch(`${apiBase()}/dashboard/runtime/mode`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ generate }),
+          credentials: "include",
+        });
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Failed to switch mode");
+        }
+      }
+    };
+    applyMode();
+    return () => {
+      cancelled = true;
+    };
   }, [generate]);
 
   useEffect(() => {
