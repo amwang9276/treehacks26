@@ -753,8 +753,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--context-interval",
         type=float,
-        default=10800,
-        help="Interval in seconds between room context captures (default: 1800 = 30 min).",
+        default=7200,
+        help="Interval in seconds between room context captures (default: 10800 = 30 min).",
     )
     parser.add_argument(
         "--enable-voice",
