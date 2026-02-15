@@ -16,3 +16,4 @@ regex>=2023.10.0,<2027.0.0
 matplotlib>=3.8,<4.0
 numba>=0.58,<0.64
 llvmlite>=0.40,<0.47
+pyserial
