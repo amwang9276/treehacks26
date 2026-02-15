@@ -7,7 +7,7 @@ function apiBase(): string {
   return process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
 }
 
-const LOG_COLUMNS = ["SYSTEM", "EMOTION", "CONTEXT", "VOICE", "FUSION", "RETRIEVAL", "MUSIC"];
+const LOG_COLUMNS = ["EMOTION", "CONTEXT", "VOICE", "FUSION", "RETRIEVAL", "MUSIC"];
 
 type RuntimeLogs = {
   running: boolean;
@@ -140,7 +140,7 @@ export default function DashboardPage() {
               }}
               type="button"
             >
-              Suno
+              Ai-Gen
             </button>
             <button
               className={`btn toggle-btn ${mode === "spotify" ? "active" : ""}`}

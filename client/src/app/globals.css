@@ -84,7 +84,7 @@ a {
 
 .log-grid {
   display: grid;
-  gap: 12px;
+  gap: 10px;
   grid-template-columns: 1fr;
 }
 
@@ -117,19 +117,45 @@ a {
 }
 
 .log-list {
-  max-height: 260px;
+  height: 140px;
   overflow: auto;
   padding-right: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: #2f3b4a transparent;
+}
+
+.log-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.log-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.log-list::-webkit-scrollbar-thumb {
+  background-color: #2f3b4a;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.log-grid .card {
+  margin-bottom: 0;
 }
 
 .log-line {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
     "Courier New", monospace;
-  font-size: 12px;
+  font-size: 10px;
   line-height: 1.4;
   margin: 0 0 6px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.log-grid h3 {
+  font-size: 13px;
+  margin: 0 0 8px;
 }
 
 @media (min-width: 900px) {
@@ -138,7 +164,7 @@ a {
   }
 
   .dashboard-layout {
-    grid-template-columns: minmax(520px, 1.2fr) minmax(380px, 1fr);
+    grid-template-columns: minmax(380px, 0.8fr) minmax(500px, 1.05fr);
     align-items: stretch;
   }
 

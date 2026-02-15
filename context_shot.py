@@ -46,9 +46,10 @@ class ContextShot:
                 {
                     "role": "system",
                     "content": (
-                        "Describe what you see in this room photo in 4 succinct bullet points."
-                        "Focus on the setting, the occassion, the number of people present,"
-                        "activities, and lighting."
+                        "Describe this scene in exactly 4 concise bullet points. "
+                        "Do not identify, name, or infer identity of any person. "
+                        "Focus on the setting/environment, approximate number of people, "
+                        "what is happening, and observable group mood/emotions plus lighting."
                     ),
                 },
                 {
