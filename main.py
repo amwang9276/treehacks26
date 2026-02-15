@@ -359,6 +359,7 @@ def main() -> None:
         with voice_lock:
             latest_voice_observation = obs
 
+
     detector = StableEmotionChangeDetector(min_stable_seconds=args.stable_seconds)
     emotion_queue: "queue.Queue[_MusicQueueItem]" = queue.Queue()
     try:
