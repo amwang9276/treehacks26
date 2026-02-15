@@ -461,9 +461,19 @@ def _music_worker(
     retrieval_es_client: Optional[Elasticsearch] = None
     retrieval_fallback_mode = False
     retrieval_fallback_logged = False
+    retrieval_initialized = False
     if openai_api_key:
         client = OpenAI(api_key=openai_api_key)
-    if not generate:
+
+    def _initialize_retrieval() -> None:
+        nonlocal retrieval_embedder
+        nonlocal retrieval_songs
+        nonlocal retrieval_song_paths
+        nonlocal retrieval_es_client
+        nonlocal retrieval_fallback_mode
+        nonlocal retrieval_initialized
+        if retrieval_initialized:
+            return
         try:
             retrieval_embedder, retrieval_songs = _load_local_song_embeddings(
                 songs_dir=songs_dir,
@@ -477,6 +487,7 @@ def _music_worker(
                 f"[MUSIC] retrieval mode ready: songs={len(retrieval_songs)} "
                 f"es_index='{es_index}'"
             )
+            retrieval_initialized = True
         except (MuLanEmbedError, RuntimeError) as err:
             print(f"[MUSIC] retrieval setup error: {err}", file=sys.stderr)
             retrieval_song_paths = _list_local_song_paths(songs_dir)
@@ -487,8 +498,13 @@ def _music_worker(
                     f"[MUSIC] retrieval fallback enabled (elastic-only): "
                     f"songs={len(retrieval_song_paths)} es_index='{es_index}'"
                 )
+            retrieval_initialized = True
         except Exception as err:
             print(f"[MUSIC] retrieval setup warning: {err}", file=sys.stderr)
+            retrieval_initialized = True
+
+    if not generate:
+        _initialize_retrieval()
 
     while True:
         item = emotion_queue.get()
@@ -549,6 +565,9 @@ def _music_worker(
                         f"task_id={result.task_id} playing={played_file}"
                     )
             else:
+                if not retrieval_initialized:
+                    print("[MUSIC] initializing retrieval on first Spotify-mode event...")
+                    _initialize_retrieval()
                 if retrieval_embedder is not None and retrieval_songs:
                     selected_path, mulan_scores, elastic_scores, blended_scores = _select_song_from_query(
                         query_text=prompt,
