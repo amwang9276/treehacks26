@@ -89,6 +89,7 @@ class DashboardRuntime:
             _music_worker,
             _read_env_file,
         )
+        from es_index import ESIndexError, upload_lyrics_folder_to_index  # type: ignore
         from play_music import MusicPlaybackError, MusicPlayer  # type: ignore
         from voice import VoiceObservation, VoiceProcessor  # type: ignore
 
@@ -104,6 +105,8 @@ class DashboardRuntime:
             "StableEmotionChangeDetector": StableEmotionChangeDetector,
             "_music_worker": _music_worker,
             "_read_env_file": _read_env_file,
+            "ESIndexError": ESIndexError,
+            "upload_lyrics_folder_to_index": upload_lyrics_folder_to_index,
             "MusicPlaybackError": MusicPlaybackError,
             "MusicPlayer": MusicPlayer,
             "VoiceObservation": VoiceObservation,
@@ -215,6 +218,8 @@ class DashboardRuntime:
             _music_worker = rt["_music_worker"]
             _read_env_file = rt["_read_env_file"]
             DEFAULT_OPENAI_MAX_TOKENS = rt["DEFAULT_OPENAI_MAX_TOKENS"]
+            ESIndexError = rt["ESIndexError"]
+            upload_lyrics_folder_to_index = rt["upload_lyrics_folder_to_index"]
             MusicPlayer = rt["MusicPlayer"]
             MusicPlaybackError = rt["MusicPlaybackError"]
             VoiceProcessor = rt["VoiceProcessor"]
@@ -262,9 +267,26 @@ class DashboardRuntime:
             retrieval_cache_dir_path = (
                 self._repo_root() / ".cache" / "mulan_song_embeddings_main"
             )
+            lyrics_dir_path = self._repo_root() / "lyrics"
 
             self._log("SYSTEM", "Dashboard runtime started")
             self._log("RETRIEVAL", f"songs_dir='{songs_dir_path}'")
+            self._log("RETRIEVAL", "syncing Elasticsearch lyrics index...")
+            try:
+                uploaded, deleted = upload_lyrics_folder_to_index(
+                    es_url,
+                    index_name="lyrics",
+                    lyrics_dir=str(lyrics_dir_path),
+                    sync_delete=True,
+                )
+                self._log(
+                    "RETRIEVAL",
+                    f"lyrics index synced: uploaded_or_updated={uploaded} deleted_stale={deleted}",
+                )
+            except ESIndexError as err:
+                self._log("RETRIEVAL", f"lyrics index sync failed: {err}")
+            except Exception as err:
+                self._log("RETRIEVAL", f"lyrics index sync warning: {err}")
 
             openai_client = OpenAI(api_key=openai_api_key) if openai_api_key else None
             context_shot = (
