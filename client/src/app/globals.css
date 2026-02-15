@@ -63,8 +63,34 @@ a {
   grid-template-columns: 1fr;
 }
 
+.log-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 1fr;
+}
+
+.log-list {
+  max-height: 260px;
+  overflow: auto;
+  padding-right: 6px;
+}
+
+.log-line {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  margin: 0 0 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 @media (min-width: 900px) {
   .source-grid {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .log-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }

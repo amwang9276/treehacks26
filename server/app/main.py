@@ -7,8 +7,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import ConfigError, load_settings
+from .dashboard_runtime import DashboardRuntime
 from .routers.auth import router as auth_router
 from .routers.camera import router as camera_router
+from .routers.dashboard_runtime import router as dashboard_runtime_router
 from .routers.semantic import router as semantic_router
 from .routers.spotify import router as spotify_router
 from .semantic_service import SemanticService
@@ -35,6 +37,7 @@ def create_app() -> FastAPI:
     app.state.session_store = InMemorySessionStore()
     app.state.cookie_signer = SessionCookieSigner(settings.session_secret)
     app.state.semantic_service = SemanticService(settings, app.state.session_store)
+    app.state.dashboard_runtime = DashboardRuntime(settings)
     logging.basicConfig(
         level=logging.INFO if settings.spotify_debug else logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -42,7 +45,7 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[settings.client_origin],
+        allow_origins=list(settings.client_origins) or [settings.client_origin],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -54,6 +57,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(camera_router)
+    app.include_router(dashboard_runtime_router)
     app.include_router(spotify_router)
     app.include_router(semantic_router)
     return app

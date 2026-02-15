@@ -19,7 +19,7 @@ export default function HomePage() {
           <p className="muted">
             Generate new music dynamically from detected room mood and context.
           </p>
-          <Link className="btn" href="/dashboard">
+          <Link className="btn" href="/dashboard?mode=suno">
             Use Suno Generated Music
           </Link>
         </div>
