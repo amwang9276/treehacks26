@@ -38,6 +38,25 @@ a {
   cursor: pointer;
 }
 
+.toggle-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.toggle-btn {
+  background: #1f2a37;
+  color: #c9d1d9;
+  border: 1px solid #2f3b4a;
+}
+
+.toggle-btn.active {
+  background: #2f81f7;
+  color: #f0f6fc;
+  border-color: #2f81f7;
+}
+
 .muted {
   color: #9aa6b2;
 }

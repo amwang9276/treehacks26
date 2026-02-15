@@ -39,6 +39,10 @@ class MusicPlayer:
             )
         self.ffmpeg_path = ffmpeg_path or shutil.which("ffmpeg")
         self._proc: Optional[subprocess.Popen] = None
+        self._proc_lock = threading.Lock()
+        self._playback_stop = threading.Event()
+        self._playback_thread: Optional[threading.Thread] = None
+        self._playback_generation = 0
 
         # Reference audio buffer for AEC
         max_chunks = (AEC_SAMPLE_RATE * AEC_BUFFER_SECONDS) // AEC_READ_CHUNK
@@ -51,38 +55,91 @@ class MusicPlayer:
         self._decoder_stop = threading.Event()
 
     def stop(self) -> None:
+        self._playback_stop.set()
+        thread = self._playback_thread
+        if thread is not None:
+            thread.join(timeout=2.0)
+        self._playback_thread = None
+
         self._stop_reference_decoder()
-        if self._proc is None:
+        with self._proc_lock:
+            proc = self._proc
+            self._proc = None
+        if proc is None:
             return
-        if self._proc.poll() is None:
-            self._proc.terminate()
+        if proc.poll() is None:
+            proc.terminate()
             try:
-                self._proc.wait(timeout=2.0)
+                proc.wait(timeout=2.0)
             except subprocess.TimeoutExpired:
-                self._proc.kill()
-        self._proc = None
+                proc.kill()
+
+    def _spawn_ffplay(self, url: str) -> subprocess.Popen:
+        return subprocess.Popen(
+            [
+                self.ffplay_path,
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "error",
+                url,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def _playback_loop(self, url: str, generation: int) -> None:
+        while (
+            not self._playback_stop.is_set()
+            and generation == self._playback_generation
+        ):
+            with self._proc_lock:
+                proc = self._proc
+            if proc is None:
+                break
+
+            # Wait for current playback to end (or stop request).
+            while proc.poll() is None:
+                if self._playback_stop.wait(timeout=0.2):
+                    break
+
+            if self._playback_stop.is_set() or generation != self._playback_generation:
+                break
+
+            # Track ended naturally. Restart from the beginning.
+            self._stop_reference_decoder()
+            if self.ffmpeg_path:
+                self._start_reference_decoder(url)
+            try:
+                next_proc = self._spawn_ffplay(url)
+            except Exception:
+                with self._proc_lock:
+                    self._proc = None
+                break
+            with self._proc_lock:
+                self._proc = next_proc
 
     def play_url(self, url: str) -> str:
         self.stop()
+        self._playback_stop.clear()
+        self._playback_generation += 1
+        generation = self._playback_generation
         try:
-            self._proc = subprocess.Popen(
-                [
-                    self.ffplay_path,
-                    "-nodisp",
-                    "-autoexit",
-                    "-loglevel",
-                    "error",
-                    url,
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            proc = self._spawn_ffplay(url)
+            with self._proc_lock:
+                self._proc = proc
         except Exception as err:
             raise MusicPlaybackError(f"Failed to launch ffplay for url {url}: {err}") from err
 
         # Start reference decoder for AEC if ffmpeg is available
         if self.ffmpeg_path:
             self._start_reference_decoder(url)
+        self._playback_thread = threading.Thread(
+            target=self._playback_loop,
+            args=(url, generation),
+            daemon=True,
+        )
+        self._playback_thread.start()
 
         return url
 

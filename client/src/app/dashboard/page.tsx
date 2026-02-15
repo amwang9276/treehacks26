@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 function apiBase(): string {
   return process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
@@ -15,15 +15,25 @@ type RuntimeLogs = {
 };
 
 export default function DashboardPage() {
+  const router = useRouter();
   const params = useSearchParams();
   const [logs, setLogs] = useState<RuntimeLogs>({ running: false });
   const [error, setError] = useState<string | null>(null);
-  const mode = params.get("mode");
-  const generate = mode === "spotify" ? false : true;
+  const [mode, setMode] = useState<"suno" | "spotify">(
+    params.get("mode") === "spotify" ? "spotify" : "suno"
+  );
+  const generate = mode === "suno";
 
   useEffect(() => {
     if (params.get("spotify_connected") === "1") {
       window.alert("Spotify successfully connected");
+    }
+  }, [params]);
+
+  useEffect(() => {
+    const qp = params.get("mode");
+    if (qp === "spotify" || qp === "suno") {
+      setMode(qp);
     }
   }, [params]);
 
@@ -99,6 +109,28 @@ export default function DashboardPage() {
       <section className="dashboard-layout">
         <div className="card camera-card">
           <h1>Dashboard</h1>
+          <div className="toggle-row">
+            <button
+              className={`btn toggle-btn ${mode === "suno" ? "active" : ""}`}
+              onClick={() => {
+                setMode("suno");
+                router.replace("/dashboard?mode=suno");
+              }}
+              type="button"
+            >
+              Suno
+            </button>
+            <button
+              className={`btn toggle-btn ${mode === "spotify" ? "active" : ""}`}
+              onClick={() => {
+                setMode("spotify");
+                router.replace("/dashboard?mode=spotify");
+              }}
+              type="button"
+            >
+              Spotify Retrieval
+            </button>
+          </div>
           <p className="muted">
             Runtime status: {logs.running ? "running" : "stopped"} | mode:{" "}
             {generate ? "suno" : "spotify retrieval"}

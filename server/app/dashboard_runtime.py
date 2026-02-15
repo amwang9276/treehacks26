@@ -132,6 +132,7 @@ class DashboardRuntime:
             self._logs.clear()
             self._latest_jpeg = None
             self._stop_event.clear()
+        self._log("SYSTEM", f"starting dashboard runtime (generate={generate})")
         self._thread = threading.Thread(
             target=self._run_pipeline,
             kwargs={"generate": generate},
@@ -200,8 +201,10 @@ class DashboardRuntime:
             time.sleep(delay_s)
 
     def _run_pipeline(self, *, generate: bool) -> None:
+        self._log("SYSTEM", "loading runtime modules...")
         with self._capture_tagged_output():
             rt = self._import_root_runtime()
+            self._log("SYSTEM", "runtime modules loaded")
             FramePacket = rt["FramePacket"]
             OpenCVCaptureSource = rt["OpenCVCaptureSource"]
             EmotionProcessor = rt["EmotionProcessor"]

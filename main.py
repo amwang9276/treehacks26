@@ -187,8 +187,8 @@ def _weighted_blend_scores(
     mulan_scores: Dict[str, float],
     elastic_scores: Dict[str, float],
     *,
-    mulan_weight: float = 0.5,
-    elastic_weight: float = 0.5,
+    mulan_weight: float = 0.7,
+    elastic_weight: float = 0.3,
 ) -> Dict[str, float]:
     total = mulan_weight + elastic_weight
     if total <= 0:
