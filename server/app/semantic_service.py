@@ -417,6 +417,12 @@ class SemanticService:
                     continue
                 try:
                     vector = embedder.embed_audio_file(str(audio_path)).tolist()
+                    logger.info(
+                        "MuLan embedding generated: track_id='%s' dims=%s vector=%s",
+                        track.track_id,
+                        len(vector),
+                        vector,
+                    )
                 except Exception:
                     self._increment_job_counter(user_id, "embed_failures", 1)
                     continue

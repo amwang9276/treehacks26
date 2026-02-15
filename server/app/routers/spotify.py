@@ -122,6 +122,12 @@ def playlists(
                 "SPOTIFY_FORBIDDEN",
                 "Spotify denied playlist access for this account/app configuration.",
             ) from err
+        if err.status_code == 429:
+            raise _error(
+                429,
+                "SPOTIFY_RATE_LIMITED",
+                "Spotify rate limited the request. Please retry shortly.",
+            ) from err
         raise _error(502, "SPOTIFY_API_ERROR", str(err)) from err
 
 
@@ -164,5 +170,11 @@ def playlist_tracks(
                 403,
                 "SPOTIFY_FORBIDDEN",
                 "Spotify denied playlist item access. Per Spotify docs, this endpoint may be restricted for playlists not accessible to the current user.",
+            ) from err
+        if err.status_code == 429:
+            raise _error(
+                429,
+                "SPOTIFY_RATE_LIMITED",
+                "Spotify rate limited the request. Please retry shortly.",
             ) from err
         raise _error(502, "SPOTIFY_API_ERROR", str(err)) from err

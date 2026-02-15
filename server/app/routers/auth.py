@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 
 from ..config import Settings
+from ..semantic_service import SemanticService
 from ..session_store import InMemorySessionStore, OAuthState, SessionCookieSigner, UserSession
 from ..spotify_api import SpotifyApiError, get_current_user_profile
 from ..spotify_oauth import (
@@ -33,6 +34,10 @@ def _store(request: Request) -> InMemorySessionStore:
 
 def _signer(request: Request) -> SessionCookieSigner:
     return request.app.state.cookie_signer
+
+
+def _semantic(request: Request) -> SemanticService:
+    return request.app.state.semantic_service
 
 
 @router.get("/login")
@@ -75,6 +80,7 @@ def callback(
     settings: Settings = Depends(_settings),
     store: InMemorySessionStore = Depends(_store),
     signer: SessionCookieSigner = Depends(_signer),
+    semantic: SemanticService = Depends(_semantic),
 ) -> Response:
     temp_sid = request.cookies.get(f"{settings.session_cookie_name}_tmp")
     if not temp_sid:
@@ -106,6 +112,23 @@ def callback(
         else None,
     )
     sid = store.create_session(session)
+    if session.spotify_user_id:
+        try:
+            job = semantic.start_or_get_job(
+                user_id=session.spotify_user_id, session_id=sid, force=False
+            )
+            if settings.spotify_debug:
+                logger.info(
+                    "Auto semantic indexing enqueued: user_id='%s' job_id='%s'",
+                    session.spotify_user_id,
+                    job.job_id,
+                )
+        except Exception as err:
+            logger.warning(
+                "Auto semantic indexing enqueue failed for user_id='%s': %s",
+                session.spotify_user_id,
+                err,
+            )
     cookie_value = signer.dumps(sid)
     resp = RedirectResponse(url=f"{settings.client_origin}/playlists", status_code=302)
     resp.set_cookie(

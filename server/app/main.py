@@ -8,7 +8,9 @@ from fastapi.responses import JSONResponse
 
 from .config import ConfigError, load_settings
 from .routers.auth import router as auth_router
+from .routers.semantic import router as semantic_router
 from .routers.spotify import router as spotify_router
+from .semantic_service import SemanticService
 from .session_store import InMemorySessionStore, SessionCookieSigner
 
 
@@ -31,6 +33,7 @@ def create_app() -> FastAPI:
     app.state.settings = settings
     app.state.session_store = InMemorySessionStore()
     app.state.cookie_signer = SessionCookieSigner(settings.session_secret)
+    app.state.semantic_service = SemanticService(settings, app.state.session_store)
     logging.basicConfig(
         level=logging.INFO if settings.spotify_debug else logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -50,6 +53,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(spotify_router)
+    app.include_router(semantic_router)
     return app
 
 

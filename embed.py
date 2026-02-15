@@ -81,6 +81,9 @@ def cmd_index_playlist(args: argparse.Namespace) -> int:
 
         try:
             vector = embedder.embed_audio_file(str(audio_path)).tolist()
+            print(
+                f"[INDEX][EMBED] track_id={track.track_id} dims={len(vector)} vector={vector}"
+            )
         except MuLanEmbedError as err:
             failed_embed += 1
             print(f"[INDEX][WARN] embedding failed for {track.track_id}: {err}")

@@ -38,28 +38,58 @@ class MuLanEmbedder:
         self._load_model()
 
     def _load_model(self) -> None:
+        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+        local_only = os.environ.get("HF_LOCAL_FILES_ONLY", "").lower() in {"1", "true", "yes"}
+        load_errors: List[str] = []
+        is_openmuq_model = self.model_id.startswith("OpenMuQ/")
+
         # Preferred backend from OpenMuQ examples.
         try:
             from muq import MuQMuLan  # type: ignore
 
-            self._mulan = MuQMuLan.from_pretrained(self.model_id).to(self.device).eval()
+            self._mulan = MuQMuLan.from_pretrained(
+                self.model_id,
+                token=hf_token,
+                local_files_only=local_only,
+            ).to(self.device).eval()
             self._backend = "muq"
             return
-        except Exception:
-            pass
+        except ModuleNotFoundError as err:
+            load_errors.append(f"muq backend failed: {err}")
+            if is_openmuq_model:
+                raise MuLanEmbedError(
+                    f"Model '{self.model_id}' requires the `muq` package. "
+                    "Install it in this environment: `pip install muq`."
+                ) from err
+        except Exception as err:
+            load_errors.append(f"muq backend failed: {err}")
 
         # Fallback to generic HF loading when muq package is unavailable.
         try:
             from transformers import AutoModel, AutoProcessor
 
-            self._processor = AutoProcessor.from_pretrained(self.model_id)
-            self._model = AutoModel.from_pretrained(self.model_id).to(self.device).eval()
+            self._processor = AutoProcessor.from_pretrained(
+                self.model_id,
+                trust_remote_code=True,
+                token=hf_token,
+                local_files_only=local_only,
+            )
+            self._model = AutoModel.from_pretrained(
+                self.model_id,
+                trust_remote_code=True,
+                token=hf_token,
+                local_files_only=local_only,
+            ).to(self.device).eval()
             self._backend = "hf"
             return
         except Exception as err:
+            load_errors.append(f"transformers backend failed: {err}")
             raise MuLanEmbedError(
-                f"Failed to load MuLan model '{self.model_id}'. Install model deps and verify "
-                "internet/auth to Hugging Face."
+                f"Failed to load MuLan model '{self.model_id}'. "
+                "Ensure model exists and is accessible, install dependencies, and verify Hugging Face auth/network. "
+                "If private/gated, run `huggingface-cli login` or set HF_TOKEN/HUGGINGFACE_TOKEN. "
+                "If running offline, set MULAN_MODEL_ID to a local path and HF_LOCAL_FILES_ONLY=true. "
+                f"Details: {' | '.join(load_errors)}"
             ) from err
 
     def _embed_audio_muq(self, wav: np.ndarray) -> np.ndarray:

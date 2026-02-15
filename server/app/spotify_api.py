@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Dict, List
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -26,31 +27,55 @@ def _http_json(
     *,
     timeout_s: float = 30.0,
     debug: bool = False,
+    retries: int = 2,
 ) -> Dict | List[Dict]:
-    if debug:
-        logger.info("Spotify API request: GET %s", url)
-    req = Request(
-        url,
-        method="GET",
-        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
-    )
-    try:
-        with urlopen(req, timeout=timeout_s) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
+    attempts = max(1, retries + 1)
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        if debug:
+            logger.info("Spotify API request: GET %s (attempt %s/%s)", url, attempt + 1, attempts)
+        req = Request(
+            url,
+            method="GET",
+            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+        )
+        try:
+            with urlopen(req, timeout=timeout_s) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+                if debug:
+                    logger.info("Spotify API success: %s", url)
+                return payload
+        except HTTPError as err:
+            details = err.read().decode("utf-8", errors="replace")
+            retryable = err.code in {429, 500, 502, 503, 504}
             if debug:
-                logger.info("Spotify API success: %s", url)
-            return payload
-    except HTTPError as err:
-        details = err.read().decode("utf-8", errors="replace")
-        if debug:
-            logger.warning("Spotify API HTTP %s for %s: %s", err.code, url, details)
-        raise SpotifyApiError(
-            f"Spotify HTTP {err.code}: {details}", status_code=err.code
-        ) from err
-    except URLError as err:
-        if debug:
-            logger.warning("Spotify API connection error for %s: %s", url, err)
-        raise SpotifyApiError(f"Spotify connection error: {err}") from err
+                logger.warning("Spotify API HTTP %s for %s: %s", err.code, url, details)
+            if retryable and attempt + 1 < attempts:
+                retry_after_header = err.headers.get("Retry-After")
+                if retry_after_header:
+                    try:
+                        delay_s = max(0.5, float(retry_after_header))
+                    except ValueError:
+                        delay_s = 1.0 + attempt
+                else:
+                    delay_s = 1.0 + attempt
+                time.sleep(delay_s)
+                continue
+            last_exc = SpotifyApiError(
+                f"Spotify HTTP {err.code}: {details}", status_code=err.code
+            )
+            break
+        except URLError as err:
+            if debug:
+                logger.warning("Spotify API connection error for %s: %s", url, err)
+            if attempt + 1 < attempts:
+                time.sleep(0.5 + attempt)
+                continue
+            last_exc = SpotifyApiError(f"Spotify connection error: {err}")
+            break
+    if isinstance(last_exc, SpotifyApiError):
+        raise last_exc
+    raise SpotifyApiError("Spotify request failed for unknown reason.")
 
 
 def get_current_user_profile(settings: Settings, access_token: str) -> Dict:

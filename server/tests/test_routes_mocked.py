@@ -28,3 +28,14 @@ def test_unauthorized_me() -> None:
     client = TestClient(create_app())
     res = client.get("/me")
     assert res.status_code == 401
+
+
+def test_unauthorized_semantic_routes() -> None:
+    _set_required_env()
+    from app.main import create_app
+
+    client = TestClient(create_app())
+    status_res = client.get("/semantic/index/status")
+    assert status_res.status_code == 401
+    start_res = client.post("/semantic/index/start")
+    assert start_res.status_code == 401
