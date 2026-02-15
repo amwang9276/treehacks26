@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from elasticsearch import Elasticsearch
@@ -24,7 +26,60 @@ class SearchHit:
     album: str
     preview_url: Optional[str]
     spotify_url: Optional[str]
+    lyrics: Optional[str]
     score: float
+
+
+_LYRICS_CACHE: Optional[Dict[str, str]] = None
+
+
+def _slugify(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")
+
+
+def _lyrics_dir() -> Path:
+    configured = os.environ.get("LYRICS_DIR", "lyrics")
+    return Path(configured).resolve()
+
+
+def _load_lyrics_cache() -> Dict[str, str]:
+    global _LYRICS_CACHE
+    if _LYRICS_CACHE is not None:
+        return _LYRICS_CACHE
+    cache: Dict[str, str] = {}
+    ldir = _lyrics_dir()
+    if not ldir.exists():
+        _LYRICS_CACHE = cache
+        return cache
+    for txt_path in sorted(ldir.glob("*.txt")):
+        key = _slugify(txt_path.stem)
+        if not key:
+            continue
+        try:
+            content = txt_path.read_text(encoding="utf-8").strip()
+        except UnicodeDecodeError:
+            content = txt_path.read_text(encoding="latin-1", errors="ignore").strip()
+        cache[key] = content
+    _LYRICS_CACHE = cache
+    return cache
+
+
+def _lyrics_candidates(track: SpotifyTrack) -> List[str]:
+    first_artist = track.artists[0] if track.artists else ""
+    all_artists = "_".join(track.artists) if track.artists else ""
+    return [
+        _slugify(track.name),
+        _slugify(f"{track.name}_{first_artist}"),
+        _slugify(f"{track.name}_{all_artists}"),
+    ]
+
+
+def _lookup_lyrics(track: SpotifyTrack) -> Optional[str]:
+    lyrics_map = _load_lyrics_cache()
+    for key in _lyrics_candidates(track):
+        if key and key in lyrics_map:
+            return lyrics_map[key]
+    return None
 
 
 def _build_client(es_url: str) -> Elasticsearch:
@@ -71,6 +126,7 @@ def ensure_index(
                     "duration_ms": {"type": "integer"},
                     "preview_url": {"type": "keyword"},
                     "spotify_url": {"type": "keyword"},
+                    "lyrics": {"type": "text"},
                     "created_at": {"type": "date"},
                     "vector": {
                         "type": "dense_vector",
@@ -108,6 +164,7 @@ def upsert_track_embedding(
     track: SpotifyTrack,
     vector: List[float],
 ) -> None:
+    lyrics = _lookup_lyrics(track)
     doc = {
         "track_id": track.track_id,
         "playlist_id": track.playlist_id,
@@ -118,6 +175,7 @@ def upsert_track_embedding(
         "duration_ms": track.duration_ms,
         "preview_url": track.preview_url,
         "spotify_url": track.spotify_url,
+        "lyrics": lyrics,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "vector": vector,
     }
@@ -132,14 +190,26 @@ def search_by_text_embedding(
     top_k: int = 10,
 ) -> List[SearchHit]:
     client = _build_client(es_url)
+    # Convert cosine similarity from [-1, 1] into confidence score [0, 1].
     body = {
-        "knn": {
-            "field": "vector",
-            "query_vector": query_vector,
-            "k": max(1, top_k),
-            "num_candidates": max(20, top_k * 4),
+        "query": {
+            "script_score": {
+                "query": {"match_all": {}},
+                "script": {
+                    "source": "(cosineSimilarity(params.q, 'vector') + 1.0) / 2.0",
+                    "params": {"q": query_vector},
+                },
+            }
         },
-        "_source": ["track_id", "name", "artists", "album", "preview_url", "spotify_url"],
+        "_source": [
+            "track_id",
+            "name",
+            "artists",
+            "album",
+            "preview_url",
+            "spotify_url",
+            "lyrics",
+        ],
         "size": max(1, top_k),
     }
     try:
@@ -162,7 +232,8 @@ def search_by_text_embedding(
                 album=str(src.get("album") or ""),
                 preview_url=src.get("preview_url"),
                 spotify_url=src.get("spotify_url"),
-                score=float(hit.get("_score") or 0.0),
+                lyrics=src.get("lyrics"),
+                score=max(0.0, min(1.0, float(hit.get("_score") or 0.0))),
             )
         )
     return hits
