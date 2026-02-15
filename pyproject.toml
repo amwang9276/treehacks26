@@ -18,6 +18,7 @@ dependencies = [
   "openai>=1.40,<2.0",
   "librosa>=0.10,<1.0",
   "elasticsearch>=8.14,<9.0",
+  "muq",
 ]
 
 [tool.setuptools]

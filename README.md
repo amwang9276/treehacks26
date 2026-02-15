@@ -134,3 +134,29 @@ Notes on playlist tracks:
 1. Backend calls Spotify `GET /v1/playlists/{playlist_id}/items` (Get a Playlist's Items).
 2. If Spotify returns `403 Forbidden`, the app now surfaces this as `SPOTIFY_FORBIDDEN` with a clear message.
 3. Spotify may restrict this endpoint based on playlist access; in that case, use playlists your signed-in user can access.
+
+## Semantic Vibe Search (Server + Client)
+
+After Spotify login, the backend now automatically starts an async indexing job that:
+1. Fetches all accessible playlists for the signed-in user
+2. Reads playlist items and keeps tracks with non-null `preview_url`
+3. Embeds preview audio with MuLan
+4. Stores vectors and metadata in Elasticsearch index `songs_mulan_<spotify_user_id>`
+
+Behavior note:
+1. If that user index already exists with stored vectors, auto-start will reuse it and skip re-fetching Spotify on login.
+2. `POST /semantic/index/start` still forces a fresh re-index.
+
+New backend endpoints:
+1. `POST /semantic/index/start`
+2. `GET /semantic/index/status`
+3. `GET /semantic/search?text=<vibe>&top_k=10`
+
+New client route:
+1. `http://127.0.0.1:3000/vibe`
+
+MuLan runtime note:
+1. `OpenMuQ/MuQ-MuLan-large` requires Python package `muq`.
+2. If model loading fails with `No module named 'muq'`, install deps again:
+   - root runtime: `pip install -r requirements.txt`
+   - server runtime: `pip install -r server/requirements-server.txt`
