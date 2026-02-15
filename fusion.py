@@ -1,10 +1,10 @@
-"""Sensor fusion: combines face emotion, audio state, and room context into a
+"""Sensor fusion: combines face emotion, voice analysis, and room context into a
 natural language description."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 from openai import OpenAI
 
@@ -14,9 +14,18 @@ class SensorState:
     emotion: Optional[str]
     emotion_score: float
     face_count: int
-    current_track_info: Optional[str]
     room_description: Optional[str]
     timestamp: float
+    # Voice fields (all optional so fusion works with partial data)
+    prosody_emotion: Optional[str] = None
+    vocal_mood: Optional[str] = None
+    vocal_mood_score: float = 0.0
+    speech_rate: Optional[float] = None
+    transcript: Optional[str] = None
+    text_emotion: Optional[str] = None
+    text_emotion_score: float = 0.0
+    topics: List[str] = field(default_factory=list)
+    keywords: List[str] = field(default_factory=list)
 
 
 class SensorFusion:
@@ -38,14 +47,14 @@ class SensorFusion:
                 {
                     "role": "system",
                     "content": (
-                        "You receive sensor data about a room. Produce a 1-2 sentence "
-                        "natural language description of the scene and mood. "
-                        "No markdown, no bullet points."
+                        "You receive sensor data about a room. Produce exactly 5 sentences "
+                        "describing the scene, mood, and atmosphere, combining all available "
+                        "sensor inputs. No markdown, no bullet points."
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=100,
+            max_tokens=250,
             temperature=0.5,
         )
         content = completion.choices[0].message.content if completion.choices else None
@@ -68,6 +77,32 @@ class SensorFusion:
                 f"There {'is' if state.face_count == 1 else 'are'} "
                 f"{state.face_count} {'person' if state.face_count == 1 else 'people'} visible."
             )
-        if state.current_track_info:
-            parts.append(f"Currently playing: {state.current_track_info}")
+        # Voice mood / prosody
+        if state.vocal_mood or state.prosody_emotion:
+            mood_label = state.vocal_mood or state.prosody_emotion
+            rate_desc = "normal"
+            if state.speech_rate is not None:
+                if state.speech_rate > 160:
+                    rate_desc = "rapid"
+                elif state.speech_rate < 100:
+                    rate_desc = "slow"
+            parts.append(
+                f"Voice mood: {mood_label} (confidence: {state.vocal_mood_score:.2f}), "
+                f"speech rate: {rate_desc}."
+            )
+        # Transcript snippet
+        if state.transcript:
+            snippet = state.transcript[:100]
+            if len(state.transcript) > 100:
+                snippet += "..."
+            parts.append(f"Transcript snippet: \"{snippet}\"")
+        # Text emotion from speech content
+        if state.text_emotion:
+            parts.append(
+                f"Text emotion: {state.text_emotion} "
+                f"(confidence: {state.text_emotion_score:.2f})."
+            )
+        # Conversation topics
+        if state.topics:
+            parts.append(f"Topics: {', '.join(state.topics[:5])}.")
         return " ".join(parts) if parts else "No sensor data available."

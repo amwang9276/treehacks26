@@ -15,10 +15,11 @@ from openai import OpenAI
 
 from camera import FramePacket, build_local_camera_help_text, build_source_from_args
 from context_shot import ContextShot
-from emotions import EmotionObservation, EmotionProcessor
+from facial_emotions import EmotionObservation, EmotionProcessor
 from fusion import SensorFusion, SensorState
-from music import MusicPlaybackError, MusicPlayer
-from suno import SunoError, SunoGenerationResult, generate_from_prompt
+from play_music import MusicPlaybackError, MusicPlayer
+from suno_gen_music import SunoError, SunoGenerationResult, generate_from_prompt
+from voice import VoiceObservation, VoiceProcessor
 
 
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
@@ -308,6 +309,24 @@ def parse_args() -> argparse.Namespace:
         default=1800,
         help="Interval in seconds between room context captures (default: 1800 = 30 min).",
     )
+    parser.add_argument(
+        "--enable-voice",
+        action="store_true",
+        default=False,
+        help="Enable voice capture and analysis.",
+    )
+    parser.add_argument(
+        "--voice-chunk-duration",
+        type=float,
+        default=5.0,
+        help="Duration in seconds of each voice processing chunk.",
+    )
+    parser.add_argument(
+        "--voice-silence-threshold",
+        type=float,
+        default=0.01,
+        help="RMS threshold below which audio is considered silence.",
+    )
     return parser.parse_args()
 
 
@@ -316,6 +335,7 @@ def main() -> None:
     source = None
     processor: Optional[EmotionProcessor] = None
     player: Optional[MusicPlayer] = None
+    voice_processor: Optional[VoiceProcessor] = None
 
     openai_api_key = get_openai_api_key(args.openai_api_key)
 
@@ -330,6 +350,15 @@ def main() -> None:
         )
         fusion = SensorFusion(client=openai_client)
 
+    # Voice shared state
+    latest_voice_observation: Optional[VoiceObservation] = None
+    voice_lock = threading.Lock()
+
+    def on_voice_observation(obs: VoiceObservation) -> None:
+        nonlocal latest_voice_observation
+        with voice_lock:
+            latest_voice_observation = obs
+
     detector = StableEmotionChangeDetector(min_stable_seconds=args.stable_seconds)
     emotion_queue: "queue.Queue[_MusicQueueItem]" = queue.Queue()
     try:
@@ -337,6 +366,17 @@ def main() -> None:
     except MusicPlaybackError as err:
         print(f"[MUSIC] playback disabled: {err}", file=sys.stderr)
         player = None
+    # Initialize voice processor if enabled
+    if args.enable_voice:
+        voice_processor = VoiceProcessor(
+            chunk_duration_s=args.voice_chunk_duration,
+            silence_threshold_rms=args.voice_silence_threshold,
+            openai_api_key=openai_api_key,
+            music_player=player,
+            on_observation=on_voice_observation,
+        )
+        voice_processor.start()
+
     worker = threading.Thread(
         target=_music_worker,
         kwargs={
@@ -365,15 +405,33 @@ def main() -> None:
             # Build fusion context if available
             fusion_context: Optional[str] = None
             if fusion is not None:
+                # Read latest voice observation thread-safely
+                with voice_lock:
+                    voice_obs = latest_voice_observation
+
+                voice_kwargs = {}
+                if voice_obs is not None and voice_obs.is_speech:
+                    voice_kwargs = dict(
+                        prosody_emotion=voice_obs.prosody_emotion,
+                        vocal_mood=voice_obs.vocal_mood,
+                        vocal_mood_score=voice_obs.vocal_mood_score,
+                        speech_rate=voice_obs.speech_rate,
+                        transcript=voice_obs.transcript,
+                        text_emotion=voice_obs.text_emotion,
+                        text_emotion_score=voice_obs.text_emotion_score,
+                        topics=voice_obs.topics,
+                        keywords=voice_obs.keywords,
+                    )
+
                 state = SensorState(
                     emotion=triggered,
                     emotion_score=observation.score,
                     face_count=observation.face_count,
-                    current_track_info=None,
                     room_description=(
                         context_shot.last_description if context_shot else None
                     ),
                     timestamp=observation.timestamp_s,
+                    **voice_kwargs,
                 )
                 try:
                     fusion_context = fusion.generate_description(state)
@@ -444,6 +502,8 @@ def main() -> None:
     finally:
         emotion_queue.put("__STOP__")
         worker.join(timeout=1.0)
+        if voice_processor is not None:
+            voice_processor.close()
         if processor is not None:
             processor.close()
         if source is not None:
